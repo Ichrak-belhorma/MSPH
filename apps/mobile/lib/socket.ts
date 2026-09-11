@@ -1,7 +1,5 @@
 import { io, type Socket } from "socket.io-client";
-import { API_BASE_URL } from "./apiClient";
-
-const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL ?? API_BASE_URL.replace(/\/api\/?$/, "");
+import { getSocketUrl } from "./config";
 
 let socket: Socket | null = null;
 
@@ -12,7 +10,7 @@ let socket: Socket | null = null;
  * there, not specific to mobile).
  */
 export function connectSocket(): Socket {
-  socket ??= io(SOCKET_URL, { autoConnect: true, reconnection: true });
+  socket ??= io(getSocketUrl(), { autoConnect: true, reconnection: true });
   return socket;
 }
 

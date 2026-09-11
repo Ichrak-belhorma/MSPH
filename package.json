@@ -17,7 +17,14 @@
     "typecheck": "pnpm -r typecheck",
     "prisma:generate": "pnpm --filter @msph/server prisma:generate",
     "prisma:migrate": "pnpm --filter @msph/server prisma:migrate",
-    "prisma:studio": "pnpm --filter @msph/server prisma:studio"
+    "prisma:studio": "pnpm --filter @msph/server prisma:studio",
+    "desktop:dev": "pnpm --filter @msph/desktop dev",
+    "desktop:build": "pnpm --filter @msph/desktop build",
+    "desktop:dist": "pnpm --filter @msph/desktop dist",
+    "desktop:dist:win": "pnpm --filter @msph/desktop dist:win",
+    "mobile:dev": "pnpm --filter @msph/mobile start",
+    "mobile:build:preview": "pnpm --filter @msph/mobile exec eas build --profile preview --platform all",
+    "mobile:build:production": "pnpm --filter @msph/mobile exec eas build --profile production --platform all"
   },
   "devDependencies": {
     "typescript": "^5.6.3"

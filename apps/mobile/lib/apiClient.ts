@@ -1,13 +1,6 @@
 import type { ApiErrorBody } from "@msph/shared";
+import { getApiBaseUrl } from "./config";
 import { clearSession, getRefreshToken, getSession, updateTokens } from "./authStore";
-
-/**
- * `EXPO_PUBLIC_API_BASE_URL` must point at a host reachable from the
- * device/emulator, not `localhost` (see the old lib/api.ts's doc comment,
- * now folded into this file — it superseded the health-check-only
- * wrapper: everything authenticated goes through here).
- */
-export const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:4000/api";
 
 export class ApiRequestError extends Error {
   status: number;
@@ -53,7 +46,7 @@ async function parseErrorBody(res: Response): Promise<ApiErrorBody> {
 async function rawRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}${path}`, {
+    res = await fetch(`${getApiBaseUrl()}${path}`, {
       ...init,
       headers: { "Content-Type": "application/json", ...init.headers },
     });
@@ -118,7 +111,7 @@ async function authenticatedRequest<T>(path: string, init: RequestInit, isRetry:
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+    res = await fetch(`${getApiBaseUrl()}${path}`, { ...init, headers });
   } catch {
     throw new NetworkError();
   }

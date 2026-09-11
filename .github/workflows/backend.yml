@@ -1,0 +1,80 @@
+name: Backend
+
+# Keeps CI simple and focused on what actually needs checking before a
+# backend change merges: does it typecheck, do the tests pass against a
+# real Postgres, does the production build succeed. No deploy step here —
+# see README.md "Production deployment" for how a real deploy is
+# triggered (platform-specific: Railway/Render/Fly.io all auto-deploy on
+# push to their configured branch once connected, which is a dashboard
+# setting on their side, not a step this workflow needs to own).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/server/**"
+      - "packages/shared/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/backend.yml"
+  pull_request:
+    paths:
+      - "apps/server/**"
+      - "packages/shared/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/backend.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        # Credentials here MUST match apps/server/vitest.config.ts's
+        # hardcoded `test.env.DATABASE_URL` — vitest sets that env block
+        # itself (see that file's doc comment for why), which overrides
+        # anything this workflow exports for the actual `pnpm test` step.
+        # Only the "apply migrations" step below reads this job's own
+        # DATABASE_URL — same DB, so it has to be the same credentials.
+        env:
+          POSTGRES_USER: msph
+          POSTGRES_PASSWORD: msph_dev_password
+          POSTGRES_DB: msph_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://msph:msph_dev_password@localhost:5432/msph_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build packages/shared
+        run: pnpm --filter @msph/shared build
+
+      - name: Typecheck
+        run: pnpm --filter @msph/server typecheck
+
+      - name: Apply test-database migrations
+        run: pnpm --filter @msph/server exec prisma migrate deploy
+
+      - name: Run tests
+        run: pnpm --filter @msph/server test
+
+      - name: Production build
+        run: pnpm --filter @msph/server build

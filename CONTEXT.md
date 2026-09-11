@@ -4,25 +4,36 @@
 persistent memory of the project. Do not redo completed work — check
 "Current status" and "Next steps" first and continue from there.
 
-Last updated: 2026-09-11 (session 6 — production-readiness audit: a
-19-dimension review of auth, authorization, validation, DB integrity,
-photo upload, realtime, both clients' UX, security, logging, env config,
-tests, TypeScript, accessibility and performance, focused on the
-explicit brief of failure-path reliability rather than new features.
-Found and fixed one real bug — `completeVisit` had no guard against
-re-completing an already-completed visit, unlike `startVisit`'s
-equivalent guard — with a regression test; added failure-path tests for
-scheduling on a resolved case and non-existent/malformed case ids;
-rewrote README.md into a real onboarding doc. See §20 for the full
-findings). Previous: session 5 — cross-client synchronization: a
-granular Socket.IO event taxonomy replacing the old 4-event "everything
-changed" design, threaded through the desktop and mobile realtime
-providers, a new committed server-side realtime test suite, and a
-13-step live desktop+mobile Playwright verification of the full
-manager+worker scenario). Session 4 — mobile application: full
-French worker app wired to the real API, real photo upload + storage
-driver, realtime, offline-safe drafts. Session 3 — desktop application:
-full French UI wired to the real API, realtime, Electron security.
+Last updated: 2026-09-11 (session 7 — production deployment readiness:
+diagnosed and fixed the root cause of the mobile app's "Server
+unreachable" error — both clients had an *unconditional* `?? "http://
+localhost:4000/api"` fallback, used in dev AND production alike, with no
+`.env` file ever present in `apps/mobile/`, so a real device (physical
+phone, Android emulator) always tried to reach itself; built a shared
+dev-vs-production API-URL config module (`packages/shared/src/config`)
+used identically by both clients, which now *fails loudly* with a clear
+on-screen message in a production build with no URL configured, instead
+of silently trying localhost. Also: backend production hardening (trust
+proxy, a packaged-Electron-safe CORS fix, real graceful shutdown, a
+Dockerfile), an S3-compatible storage driver alongside the local one,
+electron-builder Windows packaging (built + launched a real package this
+session), EAS mobile build configuration, and three GitHub Actions
+workflows. See §21 for the full findings, what was actually verified by
+running it versus what still needs real credentials/a real server this
+sandbox doesn't have, and exact next steps. Previous: session 6 —
+production-readiness audit: a 19-dimension review of auth, authorization,
+validation, DB integrity, photo upload, realtime, both clients' UX,
+security, logging, env config, tests, TypeScript, accessibility and
+performance. Found and fixed one real bug — `completeVisit` had no guard
+against re-completing an already-completed visit — with a regression
+test; rewrote README.md into a real onboarding doc. See §20. Session 5 —
+cross-client synchronization: a granular Socket.IO event taxonomy
+replacing the old 4-event "everything changed" design, a committed
+server-side realtime test suite, and a 13-step live desktop+mobile
+Playwright verification. Session 4 — mobile application: full French
+worker app wired to the real API, real photo upload + storage driver,
+realtime, offline-safe drafts. Session 3 — desktop application: full
+French UI wired to the real API, realtime, Electron security.
 
 ---
 
@@ -583,7 +594,7 @@ still-relevant condensed points:
 - Backend tests: `pnpm --filter @msph/server test` — 36 tests, still
   passing (re-ran this session after the socket fix).
 - Test DB is separate from dev DB (`msph_test` vs `msph_dev`) — see
-  section 22 "Commands reference" below for setup.
+  section 24 "Commands reference" below for setup.
 - No ESLint/Prettier anywhere in the repo yet (carried over, still not
   done — see Next steps).
 
@@ -1481,60 +1492,594 @@ found the existing loading/empty/error-state coverage already adequate,
 so there was nothing to change without adding decorative complexity the
 brief explicitly ruled out.
 
-## 21. Next steps (recommended order for the next session)
+## 21. Production deployment readiness (session 7)
 
-1. **Real device pass** — this session's cross-client verification
-   (19.4) and session 4's mobile verification were both necessarily
-   web-platform-only (no physical/emulated iOS/Android in this sandbox).
-   Highest-value remaining gap: confirm on a real device that camera
-   capture, `UploadTask`'s native upload transport (vs. the web `XHR`
-   fallback, 3.14), and realtime delivery over a real network all behave
-   the same as verified on web — and check whether the
-   mounted-but-hidden navigated-away-screen behavior noted in 19.6 has
-   any real memory/performance cost on native (React Navigation's native
-   stack typically unmounts more aggressively than its web fallback, so
-   this may simply not reproduce there — unconfirmed either way).
-2. **Socket.IO auth** — connections are still unauthenticated (noted in
-   both apps' `socket.ts` doc comments, and section 4.7). Not closed this
-   session either — still low priority while payloads stay minimal (ids
-   + one small field, no sensitive data, and every client's actual data
-   access is separately authenticated/authorized via REST regardless of
-   which events it received) — but worth closing before this ships
-   beyond internal use.
-3. **Storage driver hardening**: the desktop's "Ajouter une photo" form
-   still uses the metadata-only `POST /visits/:id/photos` endpoint (a
-   manual storageKey reference) rather than the real upload endpoint
-   (section 5) — give it a real file picker against `POST /visits/:id/
-   photos/upload` instead, for parity with mobile.
-4. **Port the live cross-client verification (19.4) into a committed
-   test** if/when the project gets CI infrastructure that can run
-   multiple dev servers + a browser — today it's a real but ephemeral
-   manual run, unlike the server-side realtime contract (19.3), which
-   already is committed and runs with the normal test suite.
-5. **ESLint/Prettier** — carried over from sessions 1-4, still not done.
-6. **Electron packaging** (`electron-builder`) for distributable
-   installers, and an Expo/EAS build for the mobile app's real iOS/
-   Android binaries — nothing done here yet, dev-mode only for both.
-7. Eventually: S3/R2 storage driver, email ingestion, an `OWNER` role
-   tier if the business ever needs one (3.2), a real accessibility pass
-   on desktop's `SearchSelect`/`Modal`/`Drawer` (currently
-   mouse-driven), hoisting French labels into `packages/shared` now
-   that both real clients need them (3.13), a background sync queue for
-   mobile if offline usage patterns turn out to need more than the
-   current "don't lose the draft, retry visibly" approach (18.8), and
-   per-event-type client refetch logic (today every event maps to the
-   same couple of invalidations per client — see 4.6 — fine at this
-   app's scale, revisit if a screen ever needs cheaper/more targeted
-   updates).
-8. Smaller polish, not urgent: the desktop cases list's "last activity"
-   column could use a real per-case last-activity timestamp if a cheap
-   backend query for it ever gets added (17.8); desktop list pages cap
-   at 100 with no further pagination (fine at this company's scale);
-   mobile's logout confirmation uses `Alert.alert`, which is a no-op on
-   `react-native-web` (fine on real native — just not exercisable in a
-   browser-based E2E, see 18.9's own scope note).
+Scope: the brief was explicit — the mobile app said "Server unreachable",
+fix the root cause (not hide it), and get the whole system (backend,
+desktop, mobile) architecturally ready for a real deployment behind a
+real HTTPS domain, never depending on `localhost`/a hardcoded developer
+IP in production. This section is the full investigation + build log;
+§23 "Next steps" carries forward only what's still open.
 
-## 22. Commands reference
+### 21.1 Root cause of "Server unreachable" (diagnosed with evidence, not guessed)
+
+Inspected the actual running code, not assumptions:
+
+- `apps/mobile/lib/apiClient.ts` (before this session):
+  `process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:4000/api"`
+  — read **unconditionally**, identically in dev and in a production
+  build. Same pattern in `lib/socket.ts` (deriving `SOCKET_URL` from
+  that same value) and `lib/photoUpload.ts`.
+- `find apps/mobile -iname ".env*"` → **no `.env` file existed at all**
+  in `apps/mobile/`. So in every normal dev run (`pnpm dev:mobile`,
+  `expo start`), `EXPO_PUBLIC_API_BASE_URL` was simply never set, and
+  the code silently fell back to `http://localhost:4000/api` — on a
+  physical phone or an Android emulator, `localhost` resolves to *that
+  device itself*, which has never run this project's server. That's the
+  literal mechanism behind "Server unreachable"/"Cannot reach the API
+  server": there was never a server at `localhost:4000` from the phone's
+  point of view.
+- The backend itself was **not** the problem — verified live:
+  `httpServer.listen(env.PORT, ...)` (no explicit host argument) binds
+  Node's default of all interfaces (`::`/`0.0.0.0`), confirmed already
+  correct; `GET /api/health` responded correctly over the network in
+  every test this session ran. CORS was also not the mobile app's
+  problem (native `fetch` — a real device/emulator, not `expo start
+  --web` — sends no `Origin` header at all, so `cors()` was never in the
+  request path for a native client; the CORS work this session did (see
+  21.3) is a real, separate desktop/production fix, not what caused this
+  symptom).
+- Socket.IO used the exact same broken derivation (`SOCKET_URL` from
+  `API_BASE_URL`), so a fix that touched only `apiClient.ts` would have
+  left the realtime connection silently pointed at localhost too.
+- **The deeper issue, beyond "someone forgot to set an env var"**: even
+  with the bug understood, the *old* code had no way to tell "a
+  developer's env var is genuinely unset in dev, fine" apart from "this
+  is a shipped production build with no URL baked in, which will look
+  exactly like this same 'Server unreachable' symptom on every single
+  user's phone, indistinguishable from a dev misconfiguration until
+  someone reads the source". That's the actual production risk this
+  session had to close — not just "add a LAN IP to my local `.env`".
+
+### 21.2 The fix: one shared config module, `isDev`-gated, fails loudly in production
+
+`packages/shared/src/config/index.ts` (new) — `resolveApiConfig(input,
+envVarName)`, the single policy both clients now delegate to (this is
+literally the brief's own suggested shape: "packages/shared/config or an
+equivalent architecture"):
+
+- An explicit, non-empty URL env var always wins (`VITE_API_BASE_URL` /
+  `EXPO_PUBLIC_API_BASE_URL`).
+- No env var set **and** `isDev: true` → the one place `localhost:4000`
+  is still allowed to appear, clearly commented as dev-only.
+- No env var set **and** `isDev: false` (a production build) → throws
+  `MissingApiUrlError`, a descriptive message naming the exact variable
+  to set. **Never** falls back to localhost in this case — this is the
+  actual fix, not the LAN-IP-for-dev part (that part already sort of
+  worked if a developer remembered to set it by hand).
+- `looksInsecureForProduction()` — a separate, non-throwing pure check
+  (kept out of `resolveApiConfig` itself so the shared module has zero
+  runtime-specific globals like `console`, since the Node server also
+  imports this package) — each client's own `config.ts` uses it to log a
+  loud warning if a configured production URL isn't `https://`.
+
+Each app has its own tiny `config.ts`/`config.ts` that reads its own
+bundler's env vars (`import.meta.env.VITE_*` for Vite, `process.env
+.EXPO_PUBLIC_*` for Expo — genuinely different mechanisms, can't be
+unified further than "same policy, different env source") and calls
+`resolveApiConfig`:
+
+- `apps/desktop/src/config.ts` — `getApiBaseUrl()`/`getSocketUrl()`/
+  `getConfigError()`/`isUsingDevDefaultApi()`. `import.meta.env.DEV` (a
+  Vite-provided boolean baked in at build time — `vite dev` vs `vite
+  build`, not spoofable by a runtime env var) is the `isDev` input.
+- `apps/mobile/lib/config.ts` — same shape, `__DEV__` (React Native's
+  build-time global) as `isDev`.
+- **Every** call site that used to read `import.meta.env.VITE_API_BASE_URL`/
+  `process.env.EXPO_PUBLIC_API_BASE_URL` directly now goes through these
+  — `apiClient.ts`, `socket.ts` on both clients, plus mobile's
+  `photoUpload.ts` (native `UploadTask` + the web `XMLHttpRequest`
+  fallback, 3.14). Grepped for stragglers after the change — none left.
+- **Startup guard, both clients**: `apps/desktop/src/main.tsx` and
+  `apps/mobile/app/_layout.tsx` call `getConfigError()` *before*
+  mounting the real app tree. A production build with no URL configured
+  now shows a plain "Erreur de configuration" screen naming exactly
+  what's missing, instead of rendering the login screen and then failing
+  every request with a confusing generic error. **Verified live, not
+  just by reading the code**: built the mobile app in production mode
+  (`expo export --platform web`, no `EXPO_PUBLIC_API_BASE_URL` set),
+  served the static output, and confirmed the exact string "Erreur de
+  configuration" appears in the rendered page (Expo Router's web static
+  rendering pre-renders the initial screen, so it shows up even in the
+  raw HTML, not just after JS hydration).
+- **"Make it obvious this is dev config"**: both clients show a small
+  on-screen indicator whenever `source === "dev-default"` (i.e. nobody
+  configured anything and the localhost fallback is active) —
+  desktop's `AppShell` topbar gets an "API dev locale" badge (title
+  attribute shows the actual URL); mobile's new
+  `components/DevApiBanner.tsx` renders a "MODE DÉV — API locale
+  (...)" banner at the top of every screen. Neither renders anything in
+  a real production build (verified: the `looksInsecureForProduction`
+  warning *did* fire in the production-mode export above, confirming
+  `isDev` really is `false` in that build — but `isUsingDevDefaultApi()`
+  correctly stayed false too once a URL was provided, so the banner
+  doesn't show for a real configured build).
+- Deleted `apps/desktop/src/lib/api.ts` — dead code (confirmed zero
+  imports anywhere) left over from the session-1 scaffold, duplicating
+  the same broken unconditional-localhost pattern this session fixed
+  everywhere else. Mobile's equivalent was already deleted in session 4.
+
+### 21.3 Backend production hardening
+
+- **`trust proxy`** (`apps/server/src/app.ts`, new): `app.set("trust
+  proxy", isProduction ? 1 : false)`. Every deployment target this
+  project targets (Railway/Render/Fly.io/a single Nginx in front of a
+  VPS) terminates TLS one hop in front of the Node process — without
+  this, `req.ip` (what `authRateLimiter` keys its per-IP login
+  rate-limit on) is the *proxy's* IP for every request, collapsing every
+  real client onto one shared rate-limit bucket. A real bug this session
+  found by reading the reverse-proxy deployment requirement carefully,
+  not something previously reported broken (this project has never been
+  deployed behind a real proxy yet).
+- **CORS: packaged Electron's `null` origin, allowed explicitly**
+  (`app.ts`): a `BrowserWindow` loaded via `win.loadFile()` (i.e. every
+  *packaged* production build — see `electron/main.cts`'s `isDev`
+  branch) sends the literal string `"null"` as its `Origin` header per
+  the Fetch spec's handling of opaque origins. The old CORS check
+  (`!origin || clientOrigins.includes(origin)`) would have rejected
+  every request from a real installed desktop app — never caught before
+  because dev/E2E testing only ever exercised the Vite dev server's real
+  `http://localhost:5173` origin, never a truly packaged build. Fixed by
+  allowing `origin === "null"` explicitly (not via `CLIENT_ORIGIN` — a
+  real browser origin should never be able to claim the literal string
+  `"null"`, so this isn't a `*`-equivalent hole). **Verified live**: a
+  real curl with `-H "Origin: null"` against a running server returns
+  200; `-H "Origin: http://evil.example"` is still rejected.
+- **CORS rejections now a clean 403, not a 500**: found while doing the
+  live CORS check above — a rejected origin's `Error` fell through to
+  the generic `errorHandler` catch-all, logging a full stack trace at
+  `error` level for what is an everyday, expected occurrence (a stray
+  scanner, a misconfigured client). New `CorsOriginError` class
+  (`middleware/errorHandler.ts`), mapped to a clean `403 CORS_REJECTED`
+  JSON body and a `warn`-level log line instead. Verified live
+  before/after: 500-with-stack-trace → 403-with-one-line-warn.
+- **Graceful shutdown actually waits, and actually closes Socket.IO**
+  (`apps/server/src/index.ts`, rewritten): the old handler called
+  `httpServer.close()` (doesn't wait for its callback) then immediately
+  `await prisma.$disconnect()` and `process.exit(0)` — an in-flight
+  request's Prisma connection could be torn out from under it, or the
+  process could exit before a response was even sent. Also, `server
+  .close()` only stops accepting *new* connections; an open Socket.IO
+  (WebSocket) connection keeps the underlying HTTP server "open"
+  indefinitely, so even a correctly-`await`-ed `close()` would hang
+  forever with any client still connected. Fixed: `io.close()` first
+  (actively disconnects every socket), *then* `await` a promisified
+  `httpServer.close()`, *then* `prisma.$disconnect()`, all guarded by a
+  10s force-exit timer (`.unref()`d — never keeps the process alive on
+  its own) in case something still hangs, plus a re-entrancy guard for a
+  second SIGTERM. **Verified live**: booted the server, sent SIGTERM,
+  confirmed the exact log sequence (`Received SIGTERM, shutting down
+  gracefully` → `Shutdown complete`) and a clean exit code.
+- **`apps/server/Dockerfile`** (new, multi-stage): `deps` (full
+  workspace install) → `build` (compile `packages/shared` then
+  `apps/server`, generate the Prisma client) → `prod-deps` (a second,
+  production-only install + its own Prisma client generation) →
+  `runtime` (non-root user, only compiled `dist/` + production
+  `node_modules` + `prisma/` copied in, nothing else). Every directory
+  stays at the same relative path (`/repo/...`) through every stage
+  deliberately — pnpm's `node_modules` is a tree of symlinks into a
+  shared `.pnpm` store, and remapping paths between `COPY --from=`
+  stages breaks those symlinks; this is *the* most common way a
+  hand-written pnpm-monorepo Dockerfile silently produces a broken
+  image, avoided here by never remapping. `CMD` runs `prisma migrate
+  deploy` (idempotent, safe to run on every container start — see
+  Dockerfile's own comment for the multi-replica caveat) then `node
+  dist/index.js`. `prisma` (the CLI, not just `@prisma/client`) moved
+  from `devDependencies` to `dependencies` in `apps/server/package.json`
+  specifically so it's present in the production `node_modules` for this
+  to work.
+  **Honesty about verification**: this sandbox has no working Docker
+  daemon (`dial unix /var/run/docker.sock: ... no such file`, and
+  starting one fails with `ulimit: Operation not permitted` — a sandbox
+  restriction, not a project bug). **Could not run an actual `docker
+  build`.** What *was* verified: every individual command the Dockerfile
+  runs (`pnpm install --frozen-lockfile`, `pnpm --filter @msph/shared
+  build`, `pnpm --filter @msph/server prisma:generate`, `pnpm --filter
+  @msph/server build`, `pnpm install --frozen-lockfile --prod`) was run
+  directly on this machine and succeeds. The Dockerfile itself is
+  unexecuted — **verify with a real `docker build -f
+  apps/server/Dockerfile -t msph-server .` before trusting it in
+  production**, ideally via the (also unexecuted) CI... no, there's no
+  backend Docker-build CI job by design (the `backend.yml` workflow
+  builds via `tsc`, matching how the app is actually likely to be
+  deployed on the listed platforms without a container registry step) —
+  a manual `docker build` is the next session's first job if Docker
+  deployment is the chosen path.
+- `.dockerignore` (new, at the repo root — Docker's standard convention:
+  it applies to the whole build context, and the build context here is
+  the repo root, not `apps/server/`, because of the workspace
+  dependency on `packages/shared`).
+- `.env.example` (root) rewritten with explicit "PRODUCTION:" callouts
+  on every variable that must change from its dev default, plus the new
+  `STORAGE_*` S3 variables (21.4) and a note on `trust proxy`.
+
+### 21.4 Object storage: S3-compatible driver added alongside local
+
+`apps/server/src/storage/s3StorageDriver.ts` (new) implements the
+existing `StorageDriver` interface (the seam sessions 4-6 already
+documented as "add an S3/R2 driver here later") using
+`@aws-sdk/client-s3`'s `PutObjectCommand` — works against real AWS S3,
+Cloudflare R2, Backblaze B2, Supabase Storage's S3-compatible endpoint,
+or a self-hosted MinIO, since they all speak the same API. Same
+random-UUID-key + safe-extension-derivation behavior as
+`localStorageDriver.ts` (never trusts the client-supplied filename as
+anything but an extension hint) — swapping drivers changes nothing about
+`Photo.storageKey`'s shape, only where the bytes live.
+
+`config/env.ts` gained `STORAGE_BUCKET`/`STORAGE_REGION`/
+`STORAGE_ENDPOINT`/`STORAGE_ACCESS_KEY`/`STORAGE_SECRET_KEY`/
+`STORAGE_FORCE_PATH_STYLE`/`STORAGE_PUBLIC_URL_BASE`, and
+`STORAGE_DRIVER`'s enum grew from `["local"]` to `["local", "s3"]`.
+`storage/index.ts`'s `createStorageDriver()` validates the three
+required S3 vars are present *before* constructing the driver, throwing
+one clear error naming every missing variable — same fail-fast
+philosophy as `config/env.ts` itself.
+
+**Verified live** (real commands, real process, not just reading the
+code): booted the server with `STORAGE_DRIVER=s3` and no credentials →
+immediate, clear startup error naming exactly `STORAGE_BUCKET,
+STORAGE_ACCESS_KEY, STORAGE_SECRET_KEY`. Booted again with
+`STORAGE_DRIVER=s3` and fake-but-present credentials → boots cleanly,
+`/api/health` responds normally (constructing an `S3Client` doesn't
+itself make a network call — only `.send()` on an actual upload would,
+and no upload was attempted). **Not verified**: an actual upload against
+a real S3/R2 bucket — no real bucket/credentials available in this
+session. Next session (or whoever provisions real storage) should
+upload one real photo through the full mobile → API → S3 → desktop-
+photo-view path before trusting this beyond "it boots".
+
+### 21.5 Desktop: electron-builder Windows packaging
+
+`apps/desktop/electron-builder.yml` (new) + `package.json` scripts
+(`dist`/`dist:win`/`dist:mac`/`dist:linux`, each running `build` first)
++ root-level `pnpm desktop:dev`/`desktop:build`/`desktop:dist`/
+`desktop:dist:win`. `appId: com.msph.desktop`, NSIS target for Windows
+(`allowToChangeInstallationDirectory`, desktop+start-menu shortcuts),
+`asar: true`, `publish: null` (no auto-update/GitHub-Releases publishing
+configured — would need a real release pipeline first).
+
+**A real packaging bug found and fixed via an actual build, not
+inspection**: desktop's renderer npm dependencies (`react`,
+`@tanstack/react-query`, `date-fns`, `socket.io-client`, `zod`,
+`@msph/shared`, ...) were listed in `package.json`'s `dependencies`.
+electron-builder auto-includes every `dependencies` entry's
+`node_modules` content in the packaged app *regardless* of the `files`
+allowlist (to make sure `require()` calls at runtime resolve) — but
+none of these are actually `require()`'d by the Electron **main**
+process at runtime; they're all bundled into `dist/assets/*.js` by Vite
+for the **renderer**, which loads that already-bundled file, not raw
+node_modules. Building with these still in `dependencies` produced a
+460× larger package than necessary: a 23MB `app.asar` containing the
+*entire* `@msph/shared` workspace package (including its TypeScript
+`src/`, not just `dist/`) and nothing-useful. Fixed by moving all of
+these to `devDependencies` (correct for an Electron+Vite app with zero
+main-process npm dependencies — confirmed `electron/main.cts`/
+`preload.cts` only import `electron` + Node builtins + local files).
+Re-packaged after the fix: **460KB** `app.asar`, containing exactly
+`dist/`, `dist-electron/`, and `package.json` — nothing else.
+
+**Executable-name bug, also found via a real build**: electron-builder
+derives the packaged binary's filename from `package.json`'s `name`
+field by default, which is the scoped `"@msph/desktop"` — producing a
+mangled `@msphdesktop` binary. Fixed with an explicit `executableName:
+msph-desktop` in `electron-builder.yml`.
+
+**Verified live, further than "it builds"**: ran a real `electron-
+builder --dir --linux` (a full package, skipping only the Windows-
+specific NSIS installer step, which needs a real Windows machine or Wine
+— neither available here) → launched the resulting `msph-desktop`
+binary under `xvfb-run`/a real `Xvfb` display → the process ran for
+several seconds with no JS-level crash and no uncaught
+`MissingApiUrlError` (only the same container-only dbus/GPU noise
+session 1 already documented as harmless). Attempted a literal
+screenshot to visually confirm the config-error screen rendered but no
+ImageMagick/Playwright was available in this sandbox for that specific
+check — the process-level evidence (ran continuously, no crash, no
+uncaught error in the log) is real but is not the same as a visual
+confirmation; a future session with a windowed display or a screenshot
+tool available should close that last gap.
+**Not verified**: the actual Windows NSIS `.exe` output — needs a real
+Windows/Wine build, wired into `.github/workflows/desktop.yml` on a
+`windows-latest` runner but not yet executed against real GitHub Actions
+infrastructure.
+
+Windows code signing is deliberately **not** configured — see
+`electron-builder.yml`'s own comment and README.md "Windows code
+signing" for exactly what an unsigned build means for end users
+(SmartScreen "Unknown publisher" warning — expected, not a bug, fine for
+internal distribution) and what buying a real certificate would involve.
+No custom app icon exists yet either (`apps/desktop/build/README.md`
+explains what to add and where) — electron-builder's own default icon is
+used until then.
+
+### 21.6 Mobile: EAS build configuration
+
+`apps/mobile/eas.json` (new) — `development`/`preview`/`production`
+profiles, each with its own `EXPO_PUBLIC_API_BASE_URL` (`preview`/
+`production` default to a placeholder production-domain string that
+must be edited to the real deployed API before a real build — documented
+in README.md, deliberately not a fake example domain baked in silently).
+`apps/mobile/app.json` gained real `android.package`/`android.versionCode`
+and `ios.bundleIdentifier`/`ios.buildNumber` (`com.msph.mobile`, version
+1) — previously absent entirely, which would have blocked any real EAS
+build outright.
+
+**Verified as far as this sandbox allows**: `expo config --type public`
+resolves the edited `app.json` correctly (bundle id/package name appear
+in the resolved config, no schema errors). `pnpm dlx eas-cli@latest
+config --profile production --platform android --non-interactive`
+successfully *parsed* `eas.json` and got as far as requiring a real
+login (`An Expo user account is required to proceed`) — i.e. eas-cli
+itself accepts the file's shape, not just "it's valid JSON". **A real
+`eas build` was not run** — needs a real Expo account (`eas login`) this
+session has no credentials for. That login, plus `eas build:configure`
+(which writes a real `extra.eas.projectId` into `app.json`), is the
+literal next step before any real Android/iOS binary exists.
+
+### 21.7 CI/CD — three GitHub Actions workflows, kept simple
+
+`.github/workflows/`:
+
+- **`backend.yml`** — push/PR (paths: `apps/server/**`,
+  `packages/shared/**`): typecheck, `pnpm --filter @msph/server test`
+  against a real `postgres:16` service container (credentials
+  deliberately matched to `vitest.config.ts`'s own hardcoded
+  `DATABASE_URL` — see the workflow's own comment for why: vitest
+  overrides `process.env` with its own fixed test config regardless of
+  the job's exported env, so the two must agree), production build. No
+  deploy step by design (platform auto-deploy-on-push is a dashboard
+  setting on Railway/Render/Fly.io's side, not a CI job's).
+- **`desktop.yml`** — manual (`workflow_dispatch`) or a `desktop-v*` tag:
+  builds the real Windows NSIS installer on a `windows-latest` runner
+  (native, no Wine needed), optionally writing `VITE_API_BASE_URL` from
+  a repo variable if `.env.production` wasn't already committed;
+  uploads the `.exe` as a build artifact.
+- **`mobile.yml`** — manual only (`workflow_dispatch`, deliberately not
+  automatic — an EAS build spends real build-minutes on the project's
+  Expo account): triggers `eas build --profile <chosen> --platform
+  <chosen> --non-interactive --no-wait` via `expo/expo-github-action`,
+  needs an `EXPO_TOKEN` repository secret.
+
+Verified: all three parse as valid YAML (`python3 -c "import yaml;
+yaml.safe_load(...)"` on each). **Not verified**: none has actually run
+on real GitHub Actions infrastructure (this sandbox has no GitHub
+Actions runner) — the backend workflow's exact command sequence *was*
+run manually on this machine and works (typecheck, migrate deploy
+against a fresh DB, test, build all succeeded — see 21.1-21.4's
+verification notes); the desktop/mobile workflows' unique steps
+(windows-latest NSIS build, a real `eas build` trigger) could not be.
+
+### 21.8 Security/hardcoded-value scan (repo-wide)
+
+Grepped for `localhost`, `127.0.0.1`, `0.0.0.0`, hardcoded LAN-style IPs,
+and hardcoded secrets/API keys across every `.ts`/`.tsx`/`.json`/`.md`
+file (excluding `node_modules`/`dist`). Findings, each categorized:
+
+- `localhost:4000/api` fallbacks in both clients' API layers — **the
+  bug**, fixed (21.1-21.2).
+- `apps/desktop/src/lib/api.ts`'s own `localhost` fallback — **dead
+  code**, deleted (unused, zero imports; duplicated the same broken
+  pattern).
+- `apps/server/electron/main.cts`'s `win.loadURL("http://localhost:5173")`
+  — legitimate, already correctly guarded by `isDev` (only reached in a
+  dev run, never a packaged build) — no change.
+- `apps/server/src/config/env.ts`'s `CLIENT_ORIGIN`/`STORAGE_PUBLIC_URL`
+  defaults — legitimate dev fallbacks, only used when the env var isn't
+  set; a real deployment must set both for real (already documented,
+  strengthened this session with explicit "PRODUCTION:" callouts in
+  `.env.example`) — no change to the code, docs improved.
+- `apps/server/vitest.config.ts` / `tests/realtime.test.ts` — test
+  fixtures, correctly using `localhost` for an in-process test server —
+  legitimate, no change.
+- README.md/CONTEXT.md's own `localhost` mentions — documentation
+  describing dev defaults — legitimate, no change beyond the doc updates
+  this session made anyway.
+- **No hardcoded LAN IP, no hardcoded secret/API key/database password**
+  found anywhere outside documented dev placeholders (`dev-access-
+  secret-change-me` etc., already clearly named as such) and test
+  fixtures.
+- `.gitignore` audited and tightened: `.env.production`/
+  `.env.development`/`.env.staging` are now explicitly ignored (only
+  `.env` and `.env.*.local` were before) — every real env file variant
+  is now covered, only the committed `.env*.example` templates survive.
+
+### 21.9 Production deployment architecture (current state)
+
+```
+DESKTOP (Electron + React)                MOBILE (Expo + React Native)
+  reads VITE_API_BASE_URL                   reads EXPO_PUBLIC_API_BASE_URL
+  baked in at `vite build` time             baked in at `eas build` time
+  (.env.production, committed —             (eas.json per-profile `env`,
+  it's a public URL, not a secret)          committed — same reasoning)
+        |  HTTPS + WSS                              |  HTTPS + WSS
+        └───────────────────┬────────────────────────┘
+                             v
+                  PRODUCTION API (Express)
+                  behind a reverse proxy that
+                  terminates TLS (Railway/Render/
+                  Fly.io's built-in proxy, or your
+                  own Nginx) — `trust proxy` set,
+                  CORS locked to real origins,
+                  Socket.IO on the same origin/port
+                  as the REST API (no separate
+                  realtime host)
+                             |
+                  ┌──────────┴──────────┐
+                  v                     v
+            PostgreSQL          Object storage (S3-
+        (managed, e.g.         compatible: S3/R2/B2/
+         Railway/Render/       Supabase/MinIO) — photo
+         RDS/Supabase)         binaries; DB stores only
+                                metadata (storageKey/url)
+```
+
+Both clients' realtime connection derives from the *same* config value
+as their REST API base URL (`getSocketUrl()`, stripping `/api`) — there
+is no separate "realtime server" to configure or point anywhere
+different; Socket.IO is mounted on the same Express `http.Server`
+(unchanged design, sessions 1-5). A production deployment therefore
+needs exactly one public HTTPS hostname for the whole backend (e.g.
+`api.your-domain.com`), never a second one for realtime.
+
+### 21.10 What still blocks a real public deployment (honest, in order)
+
+1. **A real server/hosting account** — none provisioned. Pick one of
+   Railway/Render/Fly.io/a VPS (see README.md "Backend"); none is
+   hard-coded into the app, all read `DATABASE_URL`/`CLIENT_ORIGIN`/etc.
+   from the environment.
+2. **A real domain + HTTPS certificate** for the API (e.g.
+   `api.your-company.com`) — `CLIENT_ORIGIN`, `VITE_API_BASE_URL`,
+   `EXPO_PUBLIC_API_BASE_URL` (in `eas.json`) all need this real value
+   substituted for their current placeholders once it exists.
+3. **A real Docker build**, verified end-to-end (`docker build` +
+   `docker run` + a real HTTP request) — the Dockerfile is written and
+   every command it runs was individually verified, but the multi-stage
+   image itself has never actually been built (no Docker daemon in this
+   sandbox — see 21.3).
+4. **A real S3-compatible bucket** (Cloudflare R2 is the cheapest sane
+   default — no egress fees) with real credentials, and one real photo
+   uploaded through the full mobile → API → bucket → desktop-view path.
+5. **A real Expo account** (`eas login`) + `eas build:configure` (writes
+   a real `extra.eas.projectId`) before any Android/iOS binary can be
+   produced.
+6. **A paid Apple Developer Program account** ($99/yr) before any real
+   iOS device build or App Store/TestFlight submission — not needed for
+   Android.
+7. **A Windows/Wine build environment** (or just push a `desktop-v*` tag
+   and let `.github/workflows/desktop.yml`'s `windows-latest` runner do
+   it) to produce the actual `.exe` installer — packaging itself is
+   proven (21.5), only the Windows-specific NSIS step is unexecuted.
+8. **Code signing** (Windows: a real certificate from a CA; Apple:
+   comes bundled with the Developer Program account in #6) — not set up,
+   documented as deliberately deferred (README.md "Windows code
+   signing").
+9. Optional but recommended before going live: Socket.IO auth (still an
+   open item from session 3, unrelated to this session's work — see
+   §4.7), a real app icon for desktop (currently electron-builder's
+   default) and a real logo/adaptive-icon refresh for mobile (currently
+   session-1 placeholder assets).
+
+### 21.11 Bugs found and fixed this session (consolidated)
+
+1. **The root cause**: both clients' unconditional `localhost` API-URL
+   fallback, used in dev and production alike — see 21.1-21.2.
+2. **Backend rate-limiter bypass behind a reverse proxy**: no `trust
+   proxy` set, so every request's `req.ip` would be the proxy's IP in
+   any real deployment — see 21.3.
+3. **CORS would reject every packaged-Electron production request**:
+   the `"null"` origin case — see 21.3.
+4. **CORS rejections logged as 500s with full stack traces** instead of
+   clean 403s — see 21.3.
+5. **Graceful shutdown didn't actually wait** for in-flight
+   requests/open Socket.IO connections before disconnecting Prisma and
+   exiting — see 21.3.
+6. **Desktop packaging bloat**: renderer npm dependencies wrongly listed
+   as Electron `dependencies`, pulling a full unused `node_modules` tree
+   (including source, not just built output) into every package — 50×
+   size reduction after the fix — see 21.5.
+7. **Desktop packaged executable name mangled** (`@msphdesktop`) — see
+   21.5.
+
+### 21.12 Verification summary
+
+Everything re-run clean at the end of this session: `pnpm typecheck`
+(all 4 packages), `pnpm --filter @msph/server test` (45/45, unchanged
+from session 6 — no test logic touched this session, only
+infrastructure), `pnpm --filter @msph/desktop build`, a real
+`electron-builder --dir --linux` package + launch, `pnpm --filter
+@msph/mobile exec expo export --platform web` (twice — with and without
+an API URL configured, both producing correct behavior), and a live
+`prisma migrate deploy` against a brand-new, genuinely empty database
+(created and dropped specifically for this check, not reusing
+`msph_dev`/`msph_test`). See each subsection above for exactly what was
+and wasn't verified by execution versus by reading the code — this
+session tried hard not to claim "done" for anything it couldn't actually
+run.
+
+## 23. Next steps (recommended order for the next session)
+
+Reordered this session — deployment execution now leads, since §21.10
+lists exactly what's blocking it and everything there just needs real
+credentials/infrastructure this sandbox didn't have, not more code:
+
+1. **Provision the real deployment** (§21.10, items 1-2): pick a host
+   (Railway/Render/Fly.io/a VPS), attach managed Postgres, get a real
+   domain + HTTPS. Then run a real `docker build -f
+   apps/server/Dockerfile -t msph-server .` + `docker run` for the first
+   time anywhere (§21.3/21.10 item 3) and confirm `GET /api/health`
+   responds over the real public URL.
+2. **Real S3-compatible bucket** (§21.10 item 4): create one (Cloudflare
+   R2 recommended — no egress fees), set the `STORAGE_*` env vars for
+   real, upload one real photo through the full mobile → API → bucket →
+   desktop-view path — the driver code is written and boots correctly
+   with credentials present, but has never touched a real bucket.
+3. **`eas login` + `eas build:configure`** (§21.10 item 5) — the literal
+   next command before any real Android/iOS binary can exist. Then a
+   real `eas build --profile preview` to confirm the whole pipeline
+   (app.json config, eas.json profile, the shared config module's
+   production behavior) actually produces an installable APK.
+4. **Push a `desktop-v*` tag** (or run `.github/workflows/desktop.yml`
+   manually) to get the first real Windows NSIS `.exe` out of CI (§21.5/
+   21.10 item 7) — packaging itself is proven, only this specific
+   platform-native step is unexecuted.
+5. **Real device pass** (carried over, unchanged from session 5/6) —
+   confirm on a real phone that camera capture, `UploadTask`'s native
+   upload transport (3.14), and realtime delivery over a real network
+   behave the same as verified on web, now compounded with this
+   session's config changes (confirm a real device with
+   `EXPO_PUBLIC_API_BASE_URL` unset shows the config-error screen rather
+   than something confusing, and that a LAN-IP-configured dev build
+   connects correctly).
+6. **Socket.IO auth** — connections are still unauthenticated (§4.7).
+   Not closed this session either — still low priority while payloads
+   stay minimal (ids + one small field, no sensitive data, and every
+   client's actual data access is separately authenticated/authorized
+   via REST regardless of which events it received) — but worth closing
+   before this ships beyond internal use, and directly relevant now that
+   "beyond internal use" is an active goal, not a hypothetical.
+7. **Windows/Apple code signing** (§21.10 item 8) — buy a certificate/
+   enroll in the Apple Developer Program once ready for a real public
+   (not internal-only) release; both are explicitly deferred, not
+   forgotten.
+8. **Storage driver hardening (desktop parity)**: the desktop's "Ajouter
+   une photo" form still uses the metadata-only `POST /visits/:id/photos`
+   endpoint (a manual storageKey reference) rather than the real upload
+   endpoint (section 5) — give it a real file picker against `POST
+   /visits/:id/photos/upload` instead, for parity with mobile.
+9. **Port the live cross-client verification (19.4) into a committed
+   test** now that CI infrastructure exists (`.github/workflows/`) —
+   would need a workflow that can run multiple dev servers + a browser,
+   which none of this session's three workflows currently do (they're
+   deliberately narrow — typecheck/test/build, an installer build, an
+   EAS trigger). Today it's still a real but ephemeral manual run.
+10. **ESLint/Prettier** — carried over from sessions 1-6, still not done.
+11. A real app icon for desktop (`apps/desktop/build/README.md`) and a
+    real logo/adaptive-icon refresh for mobile (currently session-1
+    placeholder assets) — cosmetic, but needed before a real public
+    release either platform's build would otherwise ship with generic
+    defaults.
+12. Eventually (unchanged from session 6, still true): email ingestion,
+    an `OWNER` role tier if the business ever needs one (3.2), a real
+    accessibility pass on desktop's `SearchSelect`/`Modal`/`Drawer`
+    (currently mouse-driven), hoisting French labels into
+    `packages/shared` now that both real clients need them (3.13), a
+    background sync queue for mobile if offline usage patterns turn out
+    to need more than the current "don't lose the draft, retry visibly"
+    approach (18.8), per-event-type client refetch logic (4.6), and the
+    desktop cases list's "last activity" column / list pagination
+    (17.8) — none of these are deployment blockers, all still valid.
+
+## 24. Commands reference
 
 ```bash
 # Install everything (run from repo root)
@@ -1577,40 +2122,93 @@ service postgresql start
 # Default logins (seeded)
 # admin@msph.local / ChangeMe123!  (ADMIN)
 # worker@msph.local / ChangeMe123! (WORKER)
+
+# --- Production (session 7 additions — see §21 for what's actually
+#     been verified vs. still needs real credentials/infrastructure) ---
+
+# Backend: build + run the production Docker image (context = repo root)
+docker build -f apps/server/Dockerfile -t msph-server .
+docker run --rm -p 4000:4000 --env-file apps/server/.env.production msph-server
+
+# Backend: apply migrations directly against a real prod DB (no container)
+DATABASE_URL="<real production DATABASE_URL>" \
+  pnpm --filter @msph/server exec prisma migrate deploy
+
+# Desktop: build the Windows installer (needs apps/desktop/.env.production
+# with a real VITE_API_BASE_URL set first — copy from .env.production.example)
+pnpm desktop:build
+pnpm desktop:dist:win    # -> apps/desktop/release/MSPH Setup <version>.exe
+# NSIS only builds natively on Windows/Wine — on this machine, validate
+# packaging itself (no installer) with:
+cd apps/desktop && pnpm exec electron-builder --dir --linux
+
+# Mobile: one-time EAS setup, then real builds (needs a real Expo account)
+npx eas-cli login
+npx eas-cli build:configure
+pnpm mobile:build:preview       # apps/mobile/eas.json "preview" profile -> APK
+pnpm mobile:build:production    # "production" profile -> AAB (Android) + iOS build
+
+# CI: trigger the desktop/mobile workflows manually instead of via the CLI
+# (GitHub CLI/web UI -> Actions -> select workflow -> Run workflow), or
+# push a `desktop-v*` tag for the desktop one.
 ```
 
-## 23. Environment variables
+## 25. Environment variables
 
-See `.env.example` at repo root for the full documented server list —
-copy it to `apps/server/.env` and fill in real values. Never commit
-`.env` files (already gitignored) or hardcode secrets in code.
+See `.env.example` at repo root for the full documented server list
+(session 7: now includes `STORAGE_BUCKET`/`STORAGE_REGION`/
+`STORAGE_ENDPOINT`/`STORAGE_ACCESS_KEY`/`STORAGE_SECRET_KEY`/
+`STORAGE_FORCE_PATH_STYLE`/`STORAGE_PUBLIC_URL_BASE`, only required when
+`STORAGE_DRIVER=s3` — see §21.4) — copy it to `apps/server/.env` and
+fill in real values. Never commit `.env`/`.env.production`/
+`.env.development`/`.env.staging` files (all gitignored as of this
+session — only the `.env*.example` templates are meant to be committed)
+or hardcode secrets in code.
 
-Desktop-specific (optional, both have sane localhost defaults — see
-`apps/desktop/src/vite-env.d.ts`):
+**Desktop** (`apps/desktop/src/config.ts` is now the single place these
+are read — see §21.2):
 
-- `VITE_API_BASE_URL` — defaults to `http://localhost:4000/api`.
+- `VITE_API_BASE_URL` — dev: defaults to `http://localhost:4000/api`
+  (only in a `vite dev` build, `import.meta.env.DEV`). Production (`vite
+  build`): **required** — a build with this unset shows a clear
+  "Erreur de configuration" screen at startup instead of trying
+  localhost. Set via `apps/desktop/.env` (dev) or `.env.production`
+  (production — copy from `.env.production.example`; Vite loads this
+  file automatically for any `vite build`).
 - `VITE_SOCKET_URL` — defaults to `VITE_API_BASE_URL` with the trailing
-  `/api` stripped.
+  `/api` stripped; same dev/production rule.
 
-Set these via a `.env` file in `apps/desktop/` (Vite's standard
-mechanism) if the server ever runs somewhere other than localhost:4000.
+**Mobile** (`apps/mobile/lib/config.ts` is now the single place these
+are read — see §21.2):
 
-Mobile-specific (optional, same defaults — see `apps/mobile/lib/
-apiClient.ts` / `lib/socket.ts`):
-
-- `EXPO_PUBLIC_API_BASE_URL` — defaults to `http://localhost:4000/api`.
-  **Must be a LAN IP, not `localhost`, when testing with Expo Go on a
-  physical device** — `localhost` on the phone resolves to the phone
-  itself, not the dev machine.
+- `EXPO_PUBLIC_API_BASE_URL` — dev: defaults to `http://localhost:4000
+  /api` (only in a dev build, RN's `__DEV__`). **Must be a LAN IP, not
+  `localhost`, when testing on a physical device or Android emulator** —
+  `localhost` there resolves to the device itself, not the dev machine
+  (this was last session's actual "Server unreachable" bug — see §21.1).
+  Production (`eas build`): **required**, set per-profile in
+  `apps/mobile/eas.json`'s `env` block (NOT read from a local `.env` file
+  — EAS builds run on Expo's own servers, which never see your shell or
+  local files) — a build with this unset shows a clear configuration-
+  error screen instead of trying localhost.
 - `EXPO_PUBLIC_SOCKET_URL` — defaults to `EXPO_PUBLIC_API_BASE_URL` with
-  the trailing `/api` stripped.
+  the trailing `/api` stripped; same dev/production rule.
 
-Set these in the shell before `expo start` (Expo's `EXPO_PUBLIC_*`
-convention — no `.env` loader needed for local dev) or in an `apps/
-mobile/.env` file (Expo also reads that automatically).
+Set the dev values in the shell before `expo start`, or in an
+`apps/mobile/.env` file (Expo reads that automatically — see
+`apps/mobile/.env.example`).
+
+Both apps show an on-screen indicator (desktop: an "API dev locale" badge
+in the topbar; mobile: a "MODE DÉV" banner) whenever
+`source === "dev-default"` — i.e. nobody configured anything and the
+hardcoded localhost fallback is active — so a stray dev build is never
+mistaken for a working connection to a real environment.
 
 Remember to add whatever origin actually serves a browser-based client
-(the desktop's `:5173`, mobile web's `:8081`, ...) to the server's own
-`CLIENT_ORIGIN` (comma-separated, see `.env.example`) — native mobile
-fetch (a real device/emulator, not web) sends no `Origin` header and is
-unaffected by this.
+(the desktop's `:5173`, mobile web's `:8081`, your real production
+desktop/web origin) to the server's own `CLIENT_ORIGIN` (comma-separated,
+see `.env.example`) — native mobile fetch (a real device/emulator, not
+web) sends no `Origin` header and is unaffected by this, and a packaged
+Electron app's `file://`-loaded renderer sends the literal string
+`"null"`, which the server allows explicitly (§21.3) — nothing to add to
+`CLIENT_ORIGIN` for that case either.

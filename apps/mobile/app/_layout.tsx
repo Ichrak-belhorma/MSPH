@@ -2,19 +2,42 @@ import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
-import { View } from "react-native";
+import { Text, View } from "react-native";
 import { QueryClientProvider } from "@tanstack/react-query";
 import "react-native-reanimated";
 
 import { AuthProvider, useAuth } from "@/auth/AuthContext";
 import { RealtimeProvider } from "@/realtime/RealtimeProvider";
 import { queryClient } from "@/lib/queryClient";
+import { getConfigError } from "@/lib/config";
+import { DevApiBanner } from "@/components/DevApiBanner";
 import { ScreenLoading } from "@/components/ui";
-import { COLORS } from "@/lib/theme";
+import { COLORS, SPACING } from "@/lib/theme";
 
 export { ErrorBoundary } from "expo-router";
 
 SplashScreen.preventAutoHideAsync();
+
+/**
+ * A production build with no `EXPO_PUBLIC_API_BASE_URL` baked in at
+ * `eas build` time (see lib/config.ts's doc comment) is a build/CI
+ * mistake, not a runtime network error — checked once, before anything
+ * else mounts (before QueryClientProvider/AuthProvider even exist, since
+ * those would just start firing failed requests against nothing). This
+ * is the deliberate "fail loudly" counterpart to the old, silent
+ * `?? "http://localhost:4000/api"` fallback that used to run
+ * unconditionally — see CONTEXT.md session 7.
+ */
+function ConfigErrorScreen({ message }: { message: string }) {
+  return (
+    <View style={{ flex: 1, backgroundColor: "#1a1d21", alignItems: "center", justifyContent: "center", padding: SPACING.lg }}>
+      <Text style={{ color: "#f5f5f5", fontSize: 16, fontWeight: "700", marginBottom: SPACING.sm }}>
+        Erreur de configuration
+      </Text>
+      <Text style={{ color: "#c9cdd3", fontSize: 13, lineHeight: 19, textAlign: "center" }}>{message}</Text>
+    </View>
+  );
+}
 
 export default function RootLayout() {
   const [loaded, error] = useFonts({
@@ -31,10 +54,14 @@ export default function RootLayout() {
 
   if (!loaded) return null;
 
+  const configError = getConfigError();
+  if (configError) return <ConfigErrorScreen message={configError.message} />;
+
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <RealtimeProvider>
+          <DevApiBanner />
           <RootNavigator />
         </RealtimeProvider>
       </AuthProvider>

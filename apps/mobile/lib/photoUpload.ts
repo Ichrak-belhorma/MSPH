@@ -1,6 +1,7 @@
 import { Platform } from "react-native";
 import { File, UploadTask, UploadType } from "expo-file-system";
-import { API_BASE_URL, refreshAccessToken } from "./apiClient";
+import { refreshAccessToken } from "./apiClient";
+import { getApiBaseUrl } from "./config";
 import { getSession } from "./authStore";
 
 export interface UploadedPhoto {
@@ -31,7 +32,7 @@ interface RawUploadResult {
  */
 async function attemptNative(visitId: string, localUri: string, caption: string, accessToken: string, onProgress?: (f: number) => void) {
   const file = new File(localUri);
-  const task = new UploadTask(file, `${API_BASE_URL}/visits/${visitId}/photos/upload`, {
+  const task = new UploadTask(file, `${getApiBaseUrl()}/visits/${visitId}/photos/upload`, {
     httpMethod: "POST",
     uploadType: UploadType.MULTIPART,
     fieldName: "photo",
@@ -53,7 +54,7 @@ async function attemptWeb(visitId: string, localUri: string, caption: string, ac
 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${API_BASE_URL}/visits/${visitId}/photos/upload`);
+    xhr.open("POST", `${getApiBaseUrl()}/visits/${visitId}/photos/upload`);
     xhr.setRequestHeader("Authorization", `Bearer ${accessToken}`);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress?.(e.loaded / e.total);

@@ -1,0 +1,63 @@
+name: Desktop (Windows installer)
+
+# Builds the Windows NSIS installer on a real Windows runner (electron-
+# builder's NSIS target needs Wine to cross-build from Linux — using a
+# native windows-latest runner avoids that entirely, and is what GitHub
+# Actions provides for free). Manual + tag-triggered only: a desktop
+# installer build is comparatively slow and isn't something every push
+# needs, unlike the backend's fast typecheck/test loop.
+#
+# The built installer needs the real production API URL baked in before
+# it's useful to an end user — see apps/desktop/.env.production.example.
+# This workflow does NOT commit that file for you; either commit a real
+# apps/desktop/.env.production yourself (it's a public URL, not a
+# secret — see .gitignore's note) before tagging a release, or set the
+# VITE_API_BASE_URL repository variable referenced below (Settings ->
+# Secrets and variables -> Actions -> Variables) and this workflow will
+# write it to .env.production at build time instead.
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build packages/shared
+        run: pnpm --filter @msph/shared build
+
+      - name: Write production API URL (only if not already committed)
+        if: ${{ vars.VITE_API_BASE_URL != '' }}
+        shell: bash
+        run: |
+          if [ ! -f apps/desktop/.env.production ]; then
+            echo "VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}" > apps/desktop/.env.production
+          fi
+
+      - name: Typecheck
+        run: pnpm --filter @msph/desktop typecheck
+
+      - name: Build Windows installer
+        run: pnpm --filter @msph/desktop dist:win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msph-desktop-windows-installer
+          path: apps/desktop/release/*.exe
+          if-no-files-found: error

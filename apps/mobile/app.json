@@ -8,9 +8,13 @@
     "scheme": "msph",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "bundleIdentifier": "com.msph.mobile",
+      "buildNumber": "1"
     },
     "android": {
+      "package": "com.msph.mobile",
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",

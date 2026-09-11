@@ -7,6 +7,11 @@ dist/
 build/
 out/
 *.tsbuildinfo
+# ...except apps/desktop/build/, which is electron-builder's
+# `buildResources` SOURCE directory (icons etc. — see electron-builder.yml
+# and build/README.md there), not generated output.
+!apps/desktop/build/
+!apps/desktop/build/**
 
 # Electron
 apps/desktop/dist/
@@ -31,11 +36,16 @@ apps/mobile/android/
 # Prisma
 apps/server/prisma/dev.db*
 
-# Env
+# Env — every real .env variant is ignored; only the committed .example
+# templates (desktop/mobile/server) document what to put in them.
 .env
 .env.local
 .env.*.local
+.env.development
+.env.production
+.env.staging
 !.env.example
+!.env.*.example
 
 # Logs
 *.log

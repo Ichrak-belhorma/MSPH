@@ -1,0 +1,35 @@
+# Lives at the repo root (Docker's standard convention: .dockerignore
+# applies to the whole BUILD CONTEXT, which is the repo root — see
+# apps/server/Dockerfile's top comment: `docker build -f
+# apps/server/Dockerfile .`) — paths below are relative to the repo root.
+
+node_modules
+**/node_modules
+**/dist
+**/dist-electron
+**/.expo
+**/*.tsbuildinfo
+
+# Other apps — irrelevant to the server image, no reason to send them
+# into the build context (Docker still hashes everything it hasn't
+# ignored, even for stages that never COPY it).
+apps/desktop
+apps/mobile
+
+# Env files / secrets — the running container gets config via --env-file
+# or the platform's own env var UI, never baked into the image.
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Dev-only local storage (see STORAGE_DRIVER=local) — never ship
+# uploaded files inside the image itself.
+apps/server/storage/uploads/**
+!apps/server/storage/uploads/.gitkeep
+
+.git
+.github
+*.md
+.vscode
+.idea

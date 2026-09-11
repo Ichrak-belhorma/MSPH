@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext.js";
+import { getApiBaseUrl, isUsingDevDefaultApi } from "../config.js";
 import { USER_ROLE_LABELS_FR } from "../lib/labels.js";
 import { initials } from "../lib/format.js";
 import {
@@ -78,6 +79,24 @@ export function AppShell() {
       <div className="main-column">
         <header className="topbar">
           <span className="topbar-title">{pageTitle(location.pathname)}</span>
+          {isUsingDevDefaultApi() && (
+            <span
+              title={`API locale de développement : ${getApiBaseUrl()} — non configuré pour la production (VITE_API_BASE_URL absent). Voir README.md.`}
+              style={{
+                marginLeft: "auto",
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: 0.4,
+                textTransform: "uppercase",
+                color: "var(--color-warning)",
+                border: "1px solid var(--color-warning)",
+                borderRadius: 4,
+                padding: "2px 8px",
+              }}
+            >
+              API dev locale
+            </span>
+          )}
         </header>
         <main className="content">
           <Outlet />

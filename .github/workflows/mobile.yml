@@ -1,0 +1,69 @@
+name: Mobile (EAS build)
+
+# Triggers a real production/preview build on Expo's own build service
+# (EAS) — this workflow does not build the app itself (React Native
+# native builds need a macOS runner for iOS and a full Android SDK/NDK
+# for Android; EAS already provides both as a managed service, which is
+# what apps/mobile/eas.json's profiles are configured for). Manual only —
+# an EAS build consumes the project's build quota/minutes, so this
+# should be a deliberate action, not something that fires on every push.
+#
+# Requires an EXPO_TOKEN repository secret (Settings -> Secrets and
+# variables -> Actions -> Secrets): generate one at
+# https://expo.dev/accounts/[account]/settings/access-tokens after
+# `eas login` + `eas build:configure` have been run once locally (see
+# README.md "Mobile — production builds"). Without this secret set, the
+# job fails immediately with a clear auth error rather than hanging.
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "eas.json build profile"
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - production
+      platform:
+        description: "Target platform"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - android
+          - ios
+
+jobs:
+  eas-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build packages/shared
+        run: pnpm --filter @msph/shared build
+
+      - name: Typecheck
+        run: pnpm --filter @msph/mobile typecheck
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Trigger EAS build
+        working-directory: apps/mobile
+        run: eas build --profile ${{ inputs.profile }} --platform ${{ inputs.platform }} --non-interactive --no-wait

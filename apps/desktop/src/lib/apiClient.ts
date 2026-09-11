@@ -1,7 +1,6 @@
 import type { ApiErrorBody } from "@msph/shared";
+import { getApiBaseUrl } from "../config.js";
 import { clearSession, getRefreshToken, getSession, updateTokens } from "./authStore.js";
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000/api";
 
 export class ApiRequestError extends Error {
   status: number;
@@ -39,7 +38,7 @@ async function parseErrorBody(res: Response): Promise<ApiErrorBody> {
 /** No auth header, no 401-retry loop — used only for the two endpoints
  * that must work without (or despite) a valid access token. */
 async function rawRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await fetch(`${getApiBaseUrl()}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...init.headers },
   });
@@ -91,7 +90,7 @@ async function authenticatedRequest<T>(path: string, init: RequestInit, isRetry:
     (headers as Record<string, string>).Authorization = `Bearer ${session.accessToken}`;
   }
 
-  const res = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+  const res = await fetch(`${getApiBaseUrl()}${path}`, { ...init, headers });
 
   if (res.status === 401 && session && !isRetry) {
     await refreshOnce();

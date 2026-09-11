@@ -1,7 +1,5 @@
 import { io, type Socket } from "socket.io-client";
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000/api";
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL ?? API_BASE_URL.replace(/\/api\/?$/, "");
+import { getSocketUrl } from "../config.js";
 
 let socket: Socket | null = null;
 
@@ -17,7 +15,7 @@ let socket: Socket | null = null;
  * client to send here yet. Noted as a gap, not pretended away.
  */
 export function connectSocket(): Socket {
-  socket ??= io(SOCKET_URL, { autoConnect: true, reconnection: true });
+  socket ??= io(getSocketUrl(), { autoConnect: true, reconnection: true });
   return socket;
 }
 

@@ -38,6 +38,15 @@ export class ApiError extends Error {
   }
 }
 
+/** Thrown by app.ts's `cors` `origin` callback for a disallowed browser
+ * origin. Given its own class (rather than a plain `Error`) so the
+ * handler below can map it to a clean 403 instead of the generic 500 —
+ * a rejected CORS origin is an expected, everyday occurrence (a stray
+ * scanner, a misconfigured client, a browser dev tools probe), not a
+ * server fault, and shouldn't spam production logs with a full stack
+ * trace at `error` level every time it happens. */
+export class CorsOriginError extends Error {}
+
 export function notFoundHandler(req: Request, res: Response) {
   const body: ApiErrorBody = {
     error: { message: `No route for ${req.method} ${req.path}`, code: "NOT_FOUND" },
@@ -77,6 +86,13 @@ export function errorHandler(err: unknown, req: Request, res: Response, next: Ne
   if (err instanceof Error && err.message === "Only image uploads are allowed") {
     const body: ApiErrorBody = { error: { message: err.message, code: "UPLOAD_ERROR" } };
     res.status(400).json(body);
+    return;
+  }
+
+  if (err instanceof CorsOriginError) {
+    logger.warn("Rejected CORS origin", { message: err.message });
+    const body: ApiErrorBody = { error: { message: "Origin not allowed", code: "CORS_REJECTED" } };
+    res.status(403).json(body);
     return;
   }
 

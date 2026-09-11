@@ -2,26 +2,47 @@ import cors from "cors";
 import express, { type Express } from "express";
 import helmet from "helmet";
 import morgan from "morgan";
-import { clientOrigins, env } from "./config/env.js";
-import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
+import { clientOrigins, env, isProduction } from "./config/env.js";
+import { CorsOriginError, errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { apiRouter } from "./routes/index.js";
 
 export function createApp(): Express {
   const app = express();
 
   app.disable("x-powered-by");
+
+  // Production deployment targets (Railway, Render, Fly.io, a VPS behind
+  // Nginx) all terminate TLS one hop in front of this process — Express
+  // sees a plain HTTP connection from the proxy's own IP unless told to
+  // trust the X-Forwarded-* headers the proxy sets. Without this,
+  // `req.ip` (what authRateLimiter keys its per-IP limit on) is the
+  // *proxy's* IP for every request, collapsing the rate limit onto one
+  // shared bucket for every real client — a genuine production bug, not
+  // just cosmetic. `1` = trust exactly one hop, which covers every
+  // platform in the list above; a deployment with an extra hop in front
+  // (e.g. Cloudflare -> Nginx -> this process) should raise this to `2`.
+  // Left off (`false`) outside production so a local dev server never
+  // trusts headers a same-machine client could spoof.
+  app.set("trust proxy", isProduction ? 1 : false);
+
   app.use(helmet());
   app.use(
     cors({
       // Requests with no Origin header (native mobile fetch, curl,
-      // server-to-server) aren't a CORS concern and are always allowed;
-      // browser-origin requests must match one of CLIENT_ORIGIN's
-      // comma-separated entries.
+      // server-to-server) aren't a CORS concern and are always allowed.
+      // A packaged Electron app's renderer, loaded via `win.loadFile()`
+      // (file:// — see apps/desktop/electron/main.cts), sends the literal
+      // string "null" as its Origin per the Fetch spec's handling of
+      // opaque origins — allowed explicitly, not via the CLIENT_ORIGIN
+      // list (a real browser origin should never be able to claim
+      // "null"; a packaged Electron app has no other origin to claim).
+      // Every other browser-origin request must match one of
+      // CLIENT_ORIGIN's comma-separated entries.
       origin(origin, callback) {
-        if (!origin || clientOrigins.includes(origin)) {
+        if (!origin || origin === "null" || clientOrigins.includes(origin)) {
           callback(null, true);
         } else {
-          callback(new Error(`Origin ${origin} is not allowed by CORS`));
+          callback(new CorsOriginError(`Origin ${origin} is not allowed by CORS`));
         }
       },
       credentials: true,

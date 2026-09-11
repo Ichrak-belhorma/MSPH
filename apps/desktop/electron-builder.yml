@@ -1,0 +1,74 @@
+# electron-builder configuration — packages the built app (dist/ +
+# dist-electron/, see `pnpm --filter @msph/desktop build`) into an
+# installable, self-contained application. Run via `pnpm --filter
+# @msph/desktop dist` (all platforms this OS can target) or `dist:win`/
+# `dist:mac`/`dist:linux` — see package.json's scripts.
+#
+# The end result requires NO Node.js, NO npm, and NO copy of this
+# repository on the user's machine: Electron bundles its own Node +
+# Chromium runtime, and `asar: true` below packs the whole app into one
+# archive inside the installer. `files` is an explicit allowlist (not
+# electron-builder's default "everything not gitignored") — this app has
+# no native Node dependency the *main* process needs at runtime (the
+# renderer's own npm dependencies are already bundled into dist/ by
+# Vite), so node_modules is deliberately not shipped at all, keeping the
+# installer small.
+
+appId: com.msph.desktop
+productName: MSPH
+# Without this, electron-builder derives the executable name from
+# package.json's scoped name ("@msph/desktop"), producing a mangled
+# "@msphdesktop" binary — found while validating this config with a real
+# `electron-builder --dir` package build (see CONTEXT.md session 7).
+executableName: msph-desktop
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+  - "!**/*.map"
+
+asar: true
+
+# No custom icon is committed yet (see CONTEXT.md "Production deployment
+# — Desktop" for why) — electron-builder falls back to its own default
+# icon until the company's real logo is added as build/icon.ico (Windows,
+# 256x256) / build/icon.icns (macOS) / build/icon.png (Linux, 512x512).
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # No code-signing certificate configured — see CONTEXT.md "Windows code
+  # signing" for exactly what this means for end users and what's needed
+  # to fix it before a real public release.
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MSPH
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  category: public.app-category.business
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+  category: Office
+
+# Auto-update / GitHub Releases publishing is not configured — set this
+# up (e.g. `provider: github`) only once the project actually has a
+# release pipeline to publish to; left disabled so a local `dist` build
+# never tries to reach out to a publish target that doesn't exist.
+publish: null
