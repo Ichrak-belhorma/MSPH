@@ -4,8 +4,8 @@
 persistent memory of the project. Do not redo completed work — check
 "Current status" and "Next steps" first and continue from there.
 
-Last updated: 2026-09-11 (session 2 — backend API: auth, all resource
-modules, authorization, case timeline, tests).
+Last updated: 2026-09-11 (session 3 — desktop application: full French UI
+wired to the real API, realtime, Electron security).
 
 ---
 
@@ -30,25 +30,28 @@ in full — this file records decisions and current state, not the brief).
 
 - **apps/server** — Node.js + Express + TypeScript, Prisma ORM, PostgreSQL,
   Socket.IO, Zod validation, JWT access+refresh auth (Argon2 password
-  hashing), vitest + supertest tests. **The full REST API is implemented
-  and tested as of session 2** — see section 8.
+  hashing), vitest + supertest tests. Full REST API implemented and tested
+  (session 2) — see section 8.
 - **apps/desktop** — Electron + React + TypeScript + Vite. Manager/admin
-  app. Still placeholder screens except Dashboard's health check — does
-  not call the case/visit/etc. API yet.
+  app. **As of session 3, this is a real, fully-French, API-wired
+  application** — not a placeholder shell. See section 17 for the full
+  build.
 - **apps/mobile** — Expo (SDK 57) + React Native + TypeScript, using
-  **Expo Router** (file-based routing). Worker field app. Same status as
-  desktop — screens exist, not wired to the real API yet.
-- **packages/shared** — domain types, Zod schemas, enums, constants. Both
-  apps and the server import from `@msph/shared`; nothing is duplicated.
+  **Expo Router** (file-based routing). Worker field app. **Still
+  placeholder screens** — not touched this session, not in scope (the task
+  was specifically the desktop app). Next session's job if picked up.
+- **packages/shared** — domain types, Zod schemas, enums, constants. All
+  three apps and the server import from `@msph/shared`; nothing is
+  duplicated. Untouched this session except reading from it — no shared
+  package changes were needed to build the desktop app.
 - **Package manager**: pnpm workspaces (`pnpm-workspace.yaml`). Pinned via
   `packageManager` in root `package.json` — currently `pnpm@10.34.5`. If
   `pnpm install` ever fails with `ERR_PNPM_NO_MATCHING_VERSION`, bump this
   field to whatever `pnpm --version` reports on the machine and re-run.
-  `pnpm-workspace.yaml` also carries an `allowBuilds` block (native
-  postinstall scripts for `argon2`, `electron`, `@prisma/client`,
-  `@prisma/engines`, `esbuild`, `prisma`) written by `pnpm approve-builds
-  --all` in session 1 — a fresh `pnpm install` on this machine won't
-  re-prompt for those.
+  `allowBuilds` in `pnpm-workspace.yaml` already covers the native
+  postinstall scripts needed (`argon2`, `electron`, `@prisma/client`,
+  `@prisma/engines`, `esbuild`, `prisma`) — a fresh `pnpm install` won't
+  re-prompt.
 
 The desktop and mobile apps have **no local database and no duplicated
 business logic** — everything goes through the Express API.
@@ -67,13 +70,18 @@ CANCELLED` (`packages/shared/src/enums.ts`).
 **Why**: a case loops through inspection/treatment/follow-up visits an
 arbitrary number of times before resolution — a single linear field can't
 represent "on the 2nd follow-up" without infinite enum growth. The
-fine-grained stage lives on the **visit history** instead, and — new in
-session 2 — on the **case activity timeline** (section 3.7). `Case.status`
-stays a coarse bucket for dashboard columns.
+fine-grained stage lives on the **visit history** and the **case activity
+timeline** (section 3.7). `Case.status` stays a coarse bucket for
+dashboard columns. Implemented as a real state machine on the server —
+see section 9.
 
-**Session 2 implements this as a real state machine**, not just a
-documented intention — see section 9 "Case status state machine" for the
-full mechanics (`apps/server/src/modules/cases/case-status.ts`).
+**Session 3 addition**: the desktop case detail page's visual "Demande →
+Consultation → Inspection → Traitement → Suivi → Résolution" stepper
+(exactly what the brief's Case Detail section asks for) is a **read-only
+projection computed client-side** from the same real data — visits, their
+inspections, treatments, and `Case.status` itself — never a separately
+tracked field. See section 17.6 / `apps/desktop/src/pages/cases/
+WorkflowStepper.tsx`.
 
 ### 3.2 User roles: ADMIN + WORKER (session 1, unchanged)
 
@@ -90,542 +98,577 @@ relationship is per-`Case`, modeling rental turnover correctly.
 
 ### 3.5 `CaseTreatment.status` (PLANNED/COMPLETED/CANCELLED) (session 1, unchanged)
 
-### 3.6 IDs are `cuid()`, but validated loosely (session 2 change)
+### 3.6 IDs are `cuid()`, but validated loosely (session 2, unchanged)
 
-Prisma still generates real cuids for every row (`@default(cuid())`,
-unchanged). **What changed**: `packages/shared/src/validation/common.ts`'s
-`cuidSchema` no longer enforces the literal cuid character format
-(`z.string().cuid()`) — it's now `z.string().trim().min(1).max(191)`.
+`cuidSchema` (`packages/shared/src/validation/common.ts`) is
+`z.string().trim().min(1).max(191)`, not `z.string().cuid()` — see the
+file's doc comment. Matters again this session: the desktop app's
+`SearchSelect` picker and every `:id` route param pass straight through
+this schema-free (the desktop doesn't re-validate ids client-side, the
+server does) — no new issue found, just confirming the session-2 decision
+held up under real UI usage.
 
-**Why**: `apps/server/prisma/seed.ts` intentionally uses human-readable
-ids for dev fixtures (`"seed-case-1"`, `"general-cockroach-treatment"`,
-...) so a developer can reference them by hand while testing by hitting
-the API directly. Strict cuid validation rejected those as 400s the
-instant this session tried to `POST /cases/:id/treatments` with
-`treatmentId: "general-cockroach-treatment"` during manual smoke testing
-— a real bug caught and fixed, not a hypothetical. Loosening the
-validator also decouples the API contract from a specific id-generation
-algorithm (could move to UUIDs later without touching every Zod schema).
-A well-formed-but-unknown id still 404s from the Prisma lookup either way.
+### 3.7 `CaseActivity` — a dedicated timeline/audit model (session 2, unchanged)
 
-### 3.7 `CaseActivity` — a dedicated timeline/audit model (session 2, new)
+Append-only, one row per meaningful thing that happens to a case, written
+in the same transaction as the mutation. See
+`apps/server/src/modules/cases/case-activity.ts`.
 
-The brief asked "consider whether a dedicated activity/event model is
-useful" for reconstructing the case timeline (creation, scheduling, visit
-started, inspection completed, photos uploaded, remarks added, treatment
-selected/performed, follow-up scheduled/completed, resolution).
+**Session 3 consequence**: `CaseActivity.message` is generated **in
+English** server-side (the backend is deliberately locale-neutral, see
+3.2's reasoning applied elsewhere too). Since the desktop app must be
+fully French, it does **not** display that raw field — see 3.11 below.
 
-**Decision: yes**, added `CaseActivity` (`apps/server/prisma/schema.prisma`,
-`packages/shared/src/enums.ts`'s `CaseActivityType`, 15 event kinds).
-Append-only, one row per meaningful thing that happens to a case, always
-written **in the same Prisma transaction** as the mutation it describes
-(`apps/server/src/modules/cases/case-activity.ts`'s `logCaseActivity`) —
-never a best-effort side effect, so the timeline can never drift from what
-actually happened or go missing if a later step in the same request fails.
+### 3.8 `POST /cases` accepts existing OR new customer/property (session 2, unchanged)
 
-Each row carries a server-generated human-readable `message` (not
-derived generically from `type` at read time — written in plain English
-at the call site, e.g. `"Initial Inspection visit scheduled for
-2026-09-11T13:50:36.000Z"`), an optional `metadata` JSON blob (e.g.
-`{visitId}`) for consumers that want structured detail, and an optional
-`actorId` (null for the rare system-derived event, though every event in
-practice today has a real actor). Exposed via `GET /cases/:id/timeline`
-and embedded (fully, ordered) in `GET /cases/:id` under `activities`.
+Session 3 exercises both paths from the desktop's New Case page — see
+17.9.
 
-This is the mechanism that actually satisfies "make the workflow
-explicit" — the coarse `Case.status` enum was never going to carry that
-by itself.
+### 3.9 `DELETE /cases/:id/treatments/:treatmentId` → keyed by the join row's own id (session 2, unchanged)
 
-### 3.8 `POST /cases` accepts existing OR new customer/property (session 2, new)
+### 3.10 Extra endpoints beyond the brief's example list (session 2, unchanged)
 
-Brief's manual intake workflow always nests a brand-new customer +
-property. In practice a manager often reports on an existing customer
-(repeat call) or an already-serviced property (rental turnover) — so
-`createCaseSchema` (`packages/shared/src/validation/case.ts`) accepts
-`customerId` **or** `customer` (nested new-customer object), same for
-`property`/`propertyId`, enforced via `superRefine` (exactly one of each
-pair, clear per-field error messages rather than a discriminated-union
-dump). `property.landlordId` vs `property.landlord` works the same way
-one level down.
+### 3.11 Desktop UI: French translation lives in the desktop app, not `packages/shared` (session 3, new)
 
-### 3.9 `DELETE /cases/:id/treatments/:treatmentId` → keyed by the join row's own id (session 2, deviation)
+The task requires the desktop interface to be in French. **Decision**:
+`packages/shared`'s `*_LABELS` constants and every domain string in the
+backend stay in English/locale-neutral (mobile is still English/
+placeholder and might not even end up French later; the backend's
+`CaseActivity.message` strings are diagnostic/audit text, not
+necessarily user-facing verbatim in every future client). A parallel
+French label layer lives entirely in `apps/desktop/src/lib/labels.ts`
+(`CASE_STATUS_LABELS_FR`, `CASE_PRIORITY_LABELS_FR`, etc.), keyed off the
+exact same enum values so it can never drift out of sync with what the
+API actually returns.
 
-Brief's literal path suggests deleting by the catalog `treatmentId`. Since
-a case could in principle have the same catalog treatment attached more
-than once across multiple rounds, that's ambiguous. Implemented as
-`DELETE /cases/:id/treatments/:caseTreatmentId` — keyed by
-`CaseTreatment.id`, the join row's own unambiguous id. Same reasoning
-applies to the `PATCH` "record execution" endpoint.
+**The harder case**: `CaseActivity.message` isn't an enum — it's a free
+English sentence built server-side (e.g. `Treatment "General Cockroach
+Treatment" recorded as performed`). Translating this *well* (not just the
+event type label) needed a dedicated reconstruction, not a lookup table:
+`apps/desktop/src/pages/cases/activityMessages.ts`'s `translateActivity()`
+rebuilds a French sentence from the activity's `type` + `metadata` +the
+case's own already-loaded data (cross-referencing `metadata.visitId`
+against `kase.visits` for visit type/date/worker, `metadata.from`/`to`
+against `CASE_STATUS_LABELS_FR` for status changes). The one field not
+in `metadata` — a treatment's name, for TREATMENT_* events — is extracted
+from the English message's consistently-quoted `"Name"` substring via
+regex (every such message is written that way server-side), not
+re-fetched or fabricated; a real value from a real field, just read out
+of a different part of the payload than usual. Falls back to generic
+French wording if that ever fails, never displays the raw English text.
 
-### 3.10 Extra endpoints beyond the brief's example list (session 2, additions)
+**A grammar bug this caught and fixed**: an early version used the visit
+type label as the sentence's grammatical subject ("Suivi planifiée" —
+wrong, `Suivi` is masculine, `planifiée` is feminine agreement).
+Fixed by restructuring every visit-related sentence around "Visite" (a
+fixed, feminine noun) as the subject, with the type label quoted as an
+apposition (`Visite « Suivi » planifiée…`) — correct regardless of which
+visit type's gender.
 
-The brief said "do not blindly follow this endpoint list if REST/domain
-conventions suggest something better." Additions made:
+### 3.12 Socket.IO: every client auto-joins the `cases` room (session 3, bug fix)
 
-- `GET/PATCH /landlords/:id` — brief only showed `GET/POST`; added for
-  parity with customers/properties (an admin needs to fix a landlord's
-  phone number eventually).
-- `POST /users`, `GET/PATCH /users/:id`, `GET /users` — not in the
-  brief's example list at all, but required by "Admin: manage workers"
-  and by there being no self-registration (accounts only exist because an
-  admin created them).
-- `POST /auth/change-password` — self-service password rotation, not
-  listed but a basic security expectation once auth exists; revokes every
-  other refresh token for that user on success.
-- `POST /visits/:id/inspection` — brief listed this explicitly; it's
-  additionally reachable through `POST /visits/:id/complete` (which
-  accepts the same three fields inline) since a worker filling in the
-  inspection is almost always also completing the visit in the same
-  moment — both paths `upsert` the same `Inspection` row.
+`apps/server/src/realtime/socket.ts`'s `emitCaseCreated`/`emitCaseUpdated`
+broadcast to a room named `"cases"` (session 2's design, see section 4) —
+but **no code ever put a socket in that room**. `JOIN_CASE_ROOM` only
+joins the *per-case* room (`case:${id}`); there was no equivalent for the
+list-level room. Every list/dashboard-level broadcast was silently going
+nowhere. Found while wiring the desktop's `RealtimeProvider` and building
+the E2E test for "desktop updates without a full reload" (section 17.14)
+— fixed by having `io.on("connection", ...)` call `socket.join(CASES_ROOM)`
+unconditionally for every connection (Socket.IO isn't authenticated yet —
+see section 17.7 — so there's no per-user filtering to apply here anyway;
+every open screen wants to know a case changed). One-line fix, but a real
+bug that would have made "dashboard updates live" simply not work.
 
-## 4. Realtime design (Socket.IO) — now wired
+## 4. Realtime design (Socket.IO)
 
-Session 1 built the transport skeleton only. **Session 2 wires real
-emits**: `apps/server/src/realtime/socket.ts` exports
-`emitCaseCreated/emitCaseUpdated/emitVisitCreated/emitVisitUpdated`,
-called from `cases.routes.ts` / `visits.routes.ts` / `case-treatments`
-mutations after each successful write. All helpers no-op quietly if
-`initSocket()` was never called (true in tests, which build the Express
-app directly via `createApp()` without booting an HTTP+Socket.IO server —
-an HTTP request must never fail because of realtime). Event shape
-unchanged from session 1's design: `cases` room for list-level changes,
-`case:${caseId}` room for a specific case's detail view.
+Session 2 wired the server-side emits (`emitCaseCreated/emitCaseUpdated/
+emitVisitCreated/emitVisitUpdated`, called from cases/visits/
+case-treatments routes). **Session 3 fixed the `cases`-room bug (3.12)
+and wired the desktop client**:
 
-**Not done**: no client (desktop/mobile) actually calls `socket.emit(
-JOIN_CASE_ROOM, ...)` or listens for these events yet — that's UI wiring,
-next session.
+- `apps/desktop/src/lib/socket.ts` — one shared `socket.io-client`
+  connection, connected on login, disconnected on logout (not per-screen).
+  Not authenticated (server doesn't support it yet — noted as a gap in
+  the file's own doc comment, not silently ignored).
+- `apps/desktop/src/realtime/RealtimeProvider.tsx` — mounted once near
+  the app root (inside `AuthProvider`). Listens for the four events and
+  calls `queryClient.invalidateQueries()` on the relevant react-query keys
+  (`api/queryKeys.ts`) — **invalidates and refetches, never patches the
+  cache by hand**, since the socket payloads are intentionally minimal
+  (`{caseId}` / `{caseId, visitId}`) and the real GET response is the only
+  actual source of truth for what changed.
+- `apps/desktop/src/realtime/useCaseRoom.ts` — joins `case:${id}` while
+  `CaseDetailPage` is mounted, leaves on unmount.
+
+**Verified working end-to-end**, not just wired: the session's E2E test
+(17.14) has the desktop sitting on a case detail page, then simulates the
+brief's exact "worker completes inspection on mobile" scenario via a
+direct API call (playing the role of the mobile app, which isn't wired
+yet), and confirms the open desktop page updates its status badge,
+workflow stepper, and visit card — including the inspection text —
+**without a page reload or any user action**, within seconds, purely from
+the Socket.IO event. Screenshot evidence in the session transcript
+(`/tmp/e2e-06-realtime-updated.png` during the session — not committed,
+ephemeral verification artifact).
+
+**Not done**: Socket.IO connections aren't authenticated (see 17.7); the
+mobile app doesn't connect at all yet (it doesn't exist as a real app —
+still session-1 placeholders).
 
 ## 5. File storage — still just the abstraction boundary, no driver yet
 
-Unchanged from session 1: `STORAGE_DRIVER=local` env var exists and is
-validated at boot, `/uploads` is statically served from
-`STORAGE_LOCAL_ROOT`, but there is still no `src/storage/` module and no
-binary upload endpoint. **Session 2's `POST /visits/:id/photos` is
-metadata-only** (`AddVisitPhotoInput`: `storageKey`, optional `url`,
-optional `caption`) — matches the brief's item 13, "Photos metadata", not
-a binary upload. When the storage driver is eventually built, this
-endpoint stays the same shape; only where `storageKey` comes from changes
-(a prior upload step returns it instead of the client making one up).
+Unchanged from session 1/2: `STORAGE_DRIVER=local` env var exists and is
+validated at boot, `/uploads` is statically served, but there is still no
+`src/storage/` module and no binary upload endpoint.
+`POST /visits/:id/photos` is metadata-only. **Session 3's desktop
+"Ajouter une photo" form is honest about this** — it asks for a text
+"référence du fichier" and says outright, in French, that real file
+storage isn't available yet, rather than presenting a fake "choose file"
+button that doesn't actually upload anything.
+See `apps/desktop/src/pages/cases/AddPhotoModal.tsx`.
 
-## 6. Authentication — implemented (session 2)
+## 6. Authentication
 
-- **Password hashing**: Argon2id (`apps/server/src/lib/password.ts`,
-  argon2's own default — stronger than bcrypt against GPU cracking at
-  equivalent cost).
-- **Access token**: JWT, `{sub, role}`, signed with `JWT_ACCESS_SECRET`,
-  short TTL (`JWT_ACCESS_TTL`, default 15m). Verified by `requireAuth`
-  middleware (`apps/server/src/middleware/auth.ts`) reading
-  `Authorization: Bearer <token>`.
-- **Refresh token**: JWT, `{sub, jti}`, signed with a **different**
-  secret (`JWT_REFRESH_SECRET`), long TTL (default 30d). The DB
-  (`RefreshToken` table) stores only `sha256(token)` — never the raw
-  token — plus `expiresAt`/`revokedAt`, keyed by `jti` (the token's own
-  claim, used as the row's primary key). A DB leak alone can't be
-  replayed as a working session.
-- **Rotation + reuse detection**
-  (`apps/server/src/modules/auth/auth.service.ts`): every
-  `POST /auth/refresh` revokes the presented token and issues a brand new
-  pair. If an **already-revoked** (previously-rotated-away) token is
-  presented again, that's treated as a possible theft signal — every
-  refresh token for that user is immediately revoked, forcing a fresh
-  login everywhere. Verified by a real test
-  (`tests/auth.test.ts` "reuse of a rotated-away token revokes every
-  session for that user").
-- **Rate limiting**: `POST /auth/login` and `POST /auth/refresh` are
-  behind `authRateLimiter` (`apps/server/src/middleware/rateLimit.ts`) —
-  20 requests / 15 min per IP, then `429` with a clean JSON body.
-  Confirmed by manual testing (21 rapid logins → the 18th genuine 401s
-  become `429`s at request 18-21 in the actual run, exact cutoff depends
-  on the window).
-- **`GET /me`**, **`POST /auth/change-password`**: see section 3.10.
-- **Never exposes `passwordHash`**: every route that returns a `User`
-  goes through `toPublicUser()` (`apps/server/src/lib/serialize.ts`),
-  which strips it. Verified by a test asserting
-  `res.body.user).not.toHaveProperty("passwordHash")`.
-- **CORS**: `CLIENT_ORIGIN` is now a comma-separated list
-  (`apps/server/src/config/env.ts`'s `clientOrigins`), so desktop's Vite
-  dev server, Expo web, and a packaged app's custom origin can all be
-  allow-listed simultaneously. Requests with no `Origin` header (native
-  mobile fetch, curl, server-to-server) are always allowed — that's not a
-  CORS concern.
+Backend implementation unchanged from session 2 (Argon2, JWT access+
+refresh, rotation + reuse detection, rate limiting — see the previous
+revision of this section, still accurate, condensed here). **Session 3
+adds the desktop client side**:
+
+- **Access token**: kept in memory only (`apps/desktop/src/lib/
+  authStore.ts` — a plain module-level store outside React, read
+  directly by the API client; `AuthContext` is a reactive wrapper around
+  it via `useSyncExternalStore`). Never written to disk.
+- **Refresh token**: persisted across app restarts via
+  `apps/desktop/src/lib/secureStorage.ts`, which calls the Electron
+  preload bridge (`window.msph.secureStorage`) — see section 17.2 for the
+  main-process implementation (OS-keychain-encrypted via `safeStorage`).
+  Falls back to `sessionStorage` when `window.msph` is undefined (running
+  outside Electron, e.g. a plain browser tab during dev) so the app
+  doesn't hard-crash there.
+- **Silent resume on boot**: `AuthProvider`'s effect tries to redeem a
+  stored refresh token via `/auth/refresh` + `/me` before rendering
+  anything auth-gated (`RequireAuth` shows a small boot screen while this
+  runs) — a user who's already logged in never sees the login screen
+  flash by.
+- **401 handling**: `apps/desktop/src/lib/apiClient.ts` catches a 401 on
+  any authenticated request, attempts exactly one refresh (de-duped
+  across concurrent requests via a shared in-flight promise), retries the
+  original request once, and — if the refresh itself fails — clears the
+  session (`SessionExpiredError`), which `RequireAuth` reacts to by
+  redirecting to `/connexion` on the next render. No manual "session
+  expired" event wiring needed anywhere else in the app.
+- **Change password**: `apps/desktop/src/pages/settings/SettingsPage.tsx`
+  wires the existing `POST /auth/change-password` endpoint.
 
 ## 7. Authorization model
 
-No permissions table — every check is either a role check
-(`requireRole`/`requireAdmin` middleware) or derived directly from the
-data ("is this user assigned to a visit on this case").
-
-**Two access-scoping helpers** (`apps/server/src/lib/authz.ts`):
-
-- `assertCaseAccess(caseId, requester)` — ADMIN always passes; WORKER
-  passes only if they're `assignedWorkerId` on **at least one visit** on
-  that case. Used by `GET /cases/:id`, `GET /cases/:id/timeline`, and the
-  "record treatment execution" `PATCH /cases/:id/treatments/:id` route.
-- `assertVisitAccess(visit.assignedWorkerId, requester)` — stricter:
-  ADMIN always passes; WORKER passes only if they are assigned to **that
-  specific visit**. Used by `GET /visits/:id`,
-  `POST /visits/:id/{start,complete,inspection,photos}`.
-
-Note the asymmetry is deliberate: a worker assigned to *any* visit on a
-case can see the *whole* case (customer, property, full visit history —
-"see previous visits" from the brief) via `GET /cases/:id`, but can only
-act on (start/complete/photo/inspect) the specific visit they're assigned
-to, not a colleague's visit on the same case.
-
-**Admin-only routes** (`requireAdmin`, i.e. `requireRole("ADMIN")`):
-all of `/users`, `/customers`, `/landlords`, `/properties`; `POST/PATCH
-/treatments` (GET is open to any authenticated role — a worker needs to
-read instructions/safety info while performing a visit); `POST /cases`;
-`PATCH /cases/:id` (including the two lifecycle actions, resolve and
-cancel); `POST /visits` (schedule); `PATCH /visits/:id` (reschedule/
-reassign/cancel); `POST /cases/:id/treatments` and `DELETE
-/cases/:id/treatments/:id` (choosing/removing treatments). A worker
-attempting any of these gets a clean `403 FORBIDDEN`, never a 404 or 500
-— confirmed by `tests/authorization.test.ts`'s parameterized sweep.
-
-**Worker-accessible routes**: `GET /cases` and `GET /visits` (list, but
-silently forced to their own `assignedWorkerId` regardless of what query
-params they send — they can never list someone else's cases/visits by
-guessing an id); `GET /cases/:id`, `GET /cases/:id/timeline`,
-`GET /visits/:id` (via the access helpers above); `POST /visits/:id/
-{start,complete,inspection,photos}`; `PATCH /cases/:id/treatments/:id`
-(record execution only — adding/removing stays admin); `GET /treatments`;
-`GET /me`, `POST /auth/change-password`.
+Unchanged from session 2 — see the two access-scoping helpers
+(`assertCaseAccess`/`assertVisitAccess`) and the admin-only route list in
+`apps/server/src/lib/authz.ts`. The desktop app is manager/admin-facing
+per the brief, so **every account created from the desktop today defaults
+to WORKER** but the "Intervenants" page lets an admin create either role
+(`apps/desktop/src/pages/workers/WorkersPage.tsx`) — an admin cannot
+change their own role or deactivate their own account from the UI (the
+form disables those fields when editing yourself), matching the same
+guard rail the server already enforces (`users.service.ts`'s
+`updateUser`) — belt and suspenders, not a replacement for the server
+check.
 
 ## 8. Backend API
 
-All routes are mounted under `/api` (`apps/server/src/routes/index.ts`).
-Every list endpoint returns `{items, page, pageSize, total}`
-(`Paginated<T>`, `packages/shared/src/validation/common.ts`). Every error
-returns `{error: {message, code, details?}}` — `details` is present and
-field-keyed for Zod validation failures (400, `VALIDATION_ERROR`).
+Unchanged from session 2. Full endpoint list, request/response shapes,
+and per-route auth requirements are in the previous revision of this
+file's section 8 (`git log -p -- CONTEXT.md` if the exact text is needed)
+— condensed reference, since this session didn't add or change any
+backend route:
 
 ```
-Auth (public except change-password)
-  POST   /auth/login              rate-limited
-  POST   /auth/refresh            rate-limited, rotates + reuse-detects
-  POST   /auth/logout             idempotent even on an already-dead token
-  POST   /auth/change-password    requireAuth; revokes all other sessions
-  GET    /me                      requireAuth
-
-Users (ADMIN only)
-  GET    /users            ?role=&active=&page=&pageSize=
-  POST   /users
-  GET    /users/:id
-  PATCH  /users/:id         guards against an admin locking themself out
-
-Customers / Landlords / Properties (ADMIN only)
-  GET    /customers | /landlords | /properties      ?search=&page=&pageSize=
-  POST   /customers | /landlords | /properties
-  GET    /customers/:id | /landlords/:id | /properties/:id
-  PATCH  /customers/:id | /landlords/:id | /properties/:id
-
-Treatments (GET: any authenticated role; POST/PATCH: ADMIN)
-  GET    /treatments        ?active=&search=&page=&pageSize=
-  POST   /treatments
-  GET    /treatments/:id
-  PATCH  /treatments/:id
-
-Cases
-  GET    /cases                      ?status=&assignedWorkerId=&search=&page=&pageSize=
-                                      (worker: assignedWorkerId forced to self)
-  POST   /cases                      ADMIN only — manual intake, see 3.8
-  GET    /cases/:id                  full detail incl. activities — see authz
-  PATCH  /cases/:id                  ADMIN only — edits + resolve/cancel/reopen
-  GET    /cases/:id/timeline         ordered CaseActivity[]
-
-  POST   /cases/:id/treatments                 ADMIN only — choose a treatment
-  PATCH  /cases/:id/treatments/:caseTreatmentId ADMIN or assigned worker — record execution
-  DELETE /cases/:id/treatments/:caseTreatmentId ADMIN only
-
-Visits
-  GET    /visits             ?caseId=&assignedWorkerId=&status=&type=&from=&to=&page=&pageSize=
-                              (worker: assignedWorkerId forced to self;
-                               from/to power mobile's Today/Upcoming)
-  POST   /visits              ADMIN only — schedule, optional assignedWorkerId
-  GET    /visits/:id          ADMIN or the assigned worker
-  PATCH  /visits/:id          ADMIN only — reschedule/reassign/cancel/notes
-  POST   /visits/:id/start                 assigned worker (or ADMIN)
-  POST   /visits/:id/complete              assigned worker (or ADMIN) — optional inline inspection
-  POST   /visits/:id/inspection            assigned worker (or ADMIN) — record/update inspection standalone
-  POST   /visits/:id/photos                assigned worker (or ADMIN) — metadata only, see section 5
-
-Health
-  GET    /health              public, checks real DB connectivity
+/auth/{login,refresh,logout,change-password}, /me
+/users, /customers, /landlords, /properties, /treatments   (CRUD, mostly ADMIN-only)
+/cases, /cases/:id, /cases/:id/timeline, /cases/:id/treatments[/:id]
+/visits, /visits/:id, /visits/:id/{start,complete,inspection,photos}
+/health
 ```
 
 ## 9. Case status state machine + timeline
 
-`apps/server/src/modules/cases/case-status.ts`:
+Unchanged from session 2 (`apps/server/src/modules/cases/case-status.ts`:
+`recalculateCaseStatus` for automatic transitions,
+`applyExplicitStatus` for the two admin actions). **Session 3 is the
+first time a human can actually drive this from a UI** — every state
+transition described here was exercised end-to-end through the desktop
+app in the E2E test (17.14): NEW → SCHEDULED (schedule initial
+consultation) → IN_PROGRESS (mobile-simulated completion) → still
+IN_PROGRESS through a chosen/performed treatment and a scheduled
+follow-up → RESOLVED (desktop "Marquer résolu" button) → confirmed
+terminal (backend rejects a new visit on a resolved case; desktop's
+"Planifier une visite" button is hidden once a case is
+resolved/cancelled).
 
-- `recalculateCaseStatus(tx, caseId, actorId?)` — called after **every**
-  visit create/schedule/start/complete/reschedule/cancel, inside the same
-  transaction as that mutation. No-ops if the case is already RESOLVED or
-  CANCELLED (terminal). Otherwise derives the bucket from the case's
-  current visits:
-  - no visits at all → `NEW`
-  - has a `SCHEDULED`/`IN_PROGRESS` visit, none `COMPLETED` yet →
-    `SCHEDULED`
-  - has at least one `COMPLETED` visit → `IN_PROGRESS`
+## 10-16. Backend implementation detail (sessions 1-2)
 
-  If the derived value differs from the stored one, updates it and logs a
-  `STATUS_CHANGED` activity with `metadata: {from, to, reason: "auto"}`.
-  This is what makes an arbitrary number of inspection → treatment →
-  follow-up loops "just work" without new enum values.
+Not repeated in full here — this session made exactly one backend change
+(3.12's one-line socket fix). For the complete backend reference (what's
+built file-by-file, testing setup and coverage, all known gotchas from
+sessions 1-2, environment variables, command reference), see the version
+of this file from before session 3 (`git log -p -- CONTEXT.md`, or trust
+that everything described there is still accurate — nothing else in
+`apps/server` or `packages/shared` was touched this session). The
+still-relevant condensed points:
 
-- `applyExplicitStatus(tx, caseId, status, actorId)` — the two admin-only
-  lifecycle actions (resolve/cancel), plus reopening. Sets/clears
-  `resolvedAt`, logs `CASE_RESOLVED`/`CASE_CANCELLED`/`STATUS_CHANGED`
-  with `reason: "manual"`.
+- Backend tests: `pnpm --filter @msph/server test` — 36 tests, still
+  passing (re-ran this session after the socket fix).
+- Test DB is separate from dev DB (`msph_test` vs `msph_dev`) — see
+  section 18 "Commands reference" below for setup.
+- No ESLint/Prettier anywhere in the repo yet (carried over, still not
+  done — see Next steps).
 
-`PATCH /cases/:id` with a `status` field calls `applyExplicitStatus`;
-every other status change in the system is automatic via
-`recalculateCaseStatus`. A route handler never does `case.status = X`
-directly outside these two functions.
+## 17. Desktop application (session 3 — this session)
 
-Verified end-to-end by `tests/workflow.test.ts`, which drives a case
-through NEW → SCHEDULED → IN_PROGRESS → SCHEDULED (2nd visit) →
-IN_PROGRESS → RESOLVED, confirming the loop doesn't get stuck and that a
-RESOLVED case rejects a new visit (`POST /visits` → 400).
+The task: build the first serious version of the desktop app, fully in
+French, professional/dense/operational styling, wired to the real API
+(no mocking), with realtime and Electron security best practices. Done —
+see section 19 for the verification evidence.
 
-## 10. What's built (session 2 — this session)
+### 17.1 Dependencies added
 
-### packages/shared additions
-- `CaseActivityType` enum (15 values) + `CASE_ACTIVITY_TYPE_LABELS`.
-- `CaseActivity` type, `CaseWithRelations.activities`, `.visits[].
-  assignedWorker/inspection`.
-- `createCaseSchema` rewritten for existing-or-new customer/property (3.8).
-- New/changed validation: `visitListQuerySchema`, `caseListQuerySchema`
-  (now paginated), `peopleListQuerySchema`, `userListQuerySchema`,
-  `treatmentListQuerySchema`, `createCustomerSchema`/`createLandlordSchema`/
-  `createPropertySchema` (previously only `update*` existed),
-  `recordInspectionSchema` (replaces the old `createInspectionSchema`),
-  `addVisitPhotoSchema` (replaces `uploadPhotoMetaSchema`).
-- `booleanQueryParam` in `validation/common.ts` — fixes a real bug: `z.
-  coerce.boolean()` makes `?active=false` mean `true` (`Boolean("false")
-  === true` in JS). Used by `active=` filters on `/users` and
-  `/treatments`.
-- `cuidSchema` loosened — see 3.6.
+`apps/desktop/package.json`: `@tanstack/react-query` (the "proper API
+client layer" — handles loading/error/caching/refetch/mutation state,
+used by every data-fetching hook in `src/api/`), `date-fns` (+ its French
+locale, for every date shown in the UI), `socket.io-client`, `zod`
+(needed directly once `src/lib/formErrors.ts` started catching
+`ZodError` from client-side validation against the same schemas the
+server uses).
 
-### apps/server additions
-- `prisma/schema.prisma`: `CaseActivity` model + `CaseActivityType` enum,
-  `User.caseActivities` relation. Two migrations this session:
-  `20260911113701_add_case_activity` (only schema change needed —
-  everything else uses the session-1 tables as-is).
-- `prisma/seed.ts`: now also seeds a WORKER login
-  (`worker@msph.local`/`ChangeMe123!`) and one sample case
-  (`seed-case-1`) with a scheduled initial inspection assigned to that
-  worker, plus fixed treatment ids.
-- `src/lib/`: `password.ts` (Argon2), `jwt.ts` (sign/verify access +
-  refresh, `hashToken`), `serialize.ts` (`toPublicUser`),
-  `pagination.ts` (`paginationArgs`/`toPaginated`), `authz.ts` (section
-  7), `assertExists.ts` (FK-lookup-before-write helper — turns a bad
-  foreign id into a clean 400 instead of a raw Postgres FK-violation
-  500).
-- `src/middleware/auth.ts` (`requireAuth`, `requireRole`, `requireAdmin`),
-  `src/middleware/rateLimit.ts` (`authRateLimiter`). `validate.ts`
-  extended with `body<T>(req)`/`query<T>(req)` typed accessors (every
-  route reads the Zod-validated body/query through these instead of
-  inline casts).
-- `src/modules/`: `auth/` (service + routes + `me.routes.ts`), `users/`,
-  `customers/`, `landlords/`, `properties/`, `treatments/`, `cases/`
-  (`cases.service.ts`, `case-treatments.service.ts`, `case-status.ts`,
-  `case-activity.ts`, `cases.routes.ts`), `visits/`
-  (`visits.service.ts`, `visits.routes.ts`). Every module follows the
-  same routes-call-service, service-owns-Prisma-and-transactions
-  pattern.
-- `src/realtime/socket.ts`: real emit helpers, see section 4.
-- `src/app.ts`: multi-origin CORS (section 6), morgan silenced under
-  `NODE_ENV=test`.
-- **Tests**: `vitest.config.ts` (env injected via `test.env`, see
-  "Testing" below), `tests/setup.ts` (truncate-all-tables
-  `beforeEach`), `tests/helpers.ts` (fixture factories:
-  `createAdmin`/`createWorker`/`createCustomerFixture`/etc.,
-  `authHeader`), and 5 test files — `auth.test.ts`,
-  `authorization.test.ts`, `cases.test.ts`, `visits.test.ts`,
-  `workflow.test.ts` — 36 tests total, all passing.
-- `tsconfig.test.json` — separate typecheck pass covering `src` + `tests`
-  together (main `tsconfig.json`'s `rootDir: "src"` can't include tests).
+### 17.2 Electron security (main process changes)
 
-## 11. Testing
+`apps/desktop/electron/secureStorage.cts` (new) — encrypted key/value
+store for the refresh token, using Electron's `safeStorage` (OS keychain:
+Keychain/DPAPI/libsecret) before anything touches disk. Three narrow IPC
+handlers (`secure-storage:{get,set,delete}`), registered from
+`main.cts`'s `app.whenReady()`. Falls back to a clearly-marked
+(`"plain:"` prefix) unencrypted value if `safeStorage.isEncryptionAvailable()`
+is false (some Linux setups have no secret-service daemon) — logged, not
+silent, so it's a visible degradation rather than a false sense of
+security.
 
-**Framework**: vitest + supertest, real Postgres (a dedicated `msph_test`
-database — never `msph_dev`), no Prisma mocking. Tests go through the
-actual Express app (`createApp()`) and actual service/Prisma/DB stack —
-this is what actually proves the authorization and workflow logic works,
-not a mock's approximation of it.
+`electron/preload.cts` — exposes exactly three calls
+(`window.msph.secureStorage.{get,set,delete}`) via `contextBridge`,
+nothing else. `contextIsolation: true` + `nodeIntegration: false`
+(already set in session 1) mean this is the *only* way the renderer can
+reach anything outside the browser sandbox — no generic filesystem/Node
+API surface was added.
 
-**One-time setup** (already done in this dev container, needed again on a
-fresh machine):
-```bash
-psql -c "CREATE DATABASE msph_test OWNER msph;"
-DATABASE_URL="postgresql://msph:msph_dev_password@localhost:5432/msph_test?schema=public" \
-  pnpm --filter @msph/server exec prisma migrate deploy
-```
+**A real build-tooling issue this hit**: `tsconfig.electron.json`'s
+`moduleResolution: "Node"` (classic) doesn't understand `.cts` files —
+importing `secureStorage` (even extensionless) failed with "cannot find
+module". Fixed by switching to `"module": "Node16"` / `"moduleResolution":
+"Node16"` (the mode actually designed for `.cts`/`.mts`), which then
+requires the *emitted* extension in the specifier
+(`import "./secureStorage.cjs"` in `main.cts`, even though the source
+file is `.cts`) — confirmed by inspecting `dist-electron/`'s actual
+output after the fix. This is the same family of gotcha as session 1's
+9.1 (Electron main process must compile to `.cjs`), same root cause
+(Node's dual CJS/ESM module system), different manifestation.
 
-**Running**: `pnpm --filter @msph/server test` (or `test:watch`). Env vars
-(`DATABASE_URL` pointed at `msph_test`, JWT secrets, etc.) are injected by
-`vitest.config.ts`'s `test.env` — set before any module evaluates, so
-`src/config/env.ts`'s own `dotenv/config` load of `apps/server/.env`
-never overrides them (dotenv doesn't clobber already-set vars). No
-`.env.test` file needed.
+### 17.3 API client layer (`apps/desktop/src/lib/` + `src/api/`)
 
-**Isolation**: `tests/setup.ts`'s `beforeEach` truncates every app table
-(children-first FK order, one transaction) — each test starts from an
-empty database and never depends on another test's leftover state.
-`fileParallelism: false` in the vitest config because all test files
-share one database.
+- `apiClient.ts` — `apiClient.{get,post,patch,delete}` + `apiClient.raw`
+  (no auth header, no 401-retry — used only for login/refresh
+  themselves). Handles the 401 → refresh → retry-once flow described in
+  section 6. `toQueryString()` builds list-endpoint query strings,
+  dropping empty/undefined values.
+- `authStore.ts` — session state outside React (section 6).
+- `queryClient.ts` — react-query `QueryClient`: doesn't retry 401/403
+  (won't fix itself), retries everything else once.
+- `socket.ts`, `secureStorage.ts`, `format.ts` (French date/name
+  formatting via date-fns), `labels.ts` (French enum labels, 3.11),
+  `formErrors.ts` (flattens a `ZodError` into `{field: message}` for
+  inline form errors — every create/edit form uses this against the same
+  `@msph/shared` schemas the server validates with, so client and server
+  validation can't silently disagree).
+- `src/api/{auth,cases,visits,customers,properties,landlords,treatments,
+  users}.ts` — one module per resource, each exporting plain fetch
+  functions **and** the react-query hooks built on them
+  (`useCasesQuery`, `useCreateCaseMutation`, etc.). Mutations invalidate
+  the relevant `queryKeys` (`src/api/queryKeys.ts` — the single source of
+  truth for cache keys, also used directly by `RealtimeProvider` so a
+  socket event invalidates the exact same keys a mutation would).
+- `landlords.ts` is deliberately thin (list/search + create only) — see
+  17.10, there's no standalone Landlords page.
 
-**Coverage** (36 tests / 5 files, all passing):
-- `auth.test.ts` — login success/failure/inactive-user/malformed-body,
-  refresh rotation + reuse-detection (2 tests), `GET /me` auth
-  requirement + garbage-token rejection.
-- `authorization.test.ts` — parameterized sweep of 9 admin-only routes
-  asserting a worker gets 403 on each, admin gets through on a sample,
-  no-token gets 401, worker CAN read `/treatments`.
-- `cases.test.ts` — create with new customer+property, create with
-  existing ids, create-with-initial-visit (status → SCHEDULED),
-  validation (neither/both customer forms), admin-only enforcement.
-- `visits.test.ts` — schedule → status auto-transition, worker can't
-  schedule, full access-scoping matrix (no access / assigned / a
-  *different* worker still denied / can't start someone else's visit),
-  start → complete → inspection recorded → case IN_PROGRESS →
-  timeline has the right event types in it.
-- `workflow.test.ts` — the brief's full "Done criteria" walkthrough as
-  one test: intake → schedule → assign → inspect → treatment chosen →
-  treatment performed → follow-up visit (2nd loop through
-  SCHEDULED/IN_PROGRESS) → worker blocked from resolving → admin resolves
-  → resolution is terminal (new visit rejected) → timeline has every
-  expected event type in the right order.
+### 17.4 Design system (`apps/desktop/src/styles/global.css`, full rewrite)
 
-**Not covered by automated tests** (verified manually instead, via a full
-curl walkthrough during this session — see git history / this section's
-predecessor in the conversation, not reproduced as a script): Socket.IO
-emits (no test client wired up), rate-limiter's exact request-count
-threshold (confirmed manually: 21 rapid bad logins → requests 18-21
-returned 429), CORS origin rejection.
+Replaced session 1's minimal stylesheet with a real design system:
+CSS-custom-property tokens (neutral surfaces, a teal brand accent shared
+with the mobile app's existing color, semantic status colors), small
+border radii throughout (4-6px — explicitly avoiding the "overly rounded
+childish" look the brief warned against), no gradients, no decorative
+shadows on cards (flat, bordered surfaces — shadows reserved for actual
+overlays: modals/drawers/dropdowns). Dark sidebar + light content area
+(the Linear/Vercel-dashboard pattern — reads as an operational tool, not
+a marketing page). Dense table rows, compact form fields, a small
+hand-authored SVG icon set (`components/icons.tsx` — ~25 icons, no icon
+library dependency).
 
-## 12. Current status — verified working end-to-end (session 2)
+Shared components built once, reused everywhere: `Badge.tsx` (status/
+priority/visit-status/treatment-status chips, each with a semantic tone),
+`Modal.tsx` / `Drawer.tsx` (portal-rendered, Escape-to-close,
+click-outside-to-close), `States.tsx` (`LoadingState`/`ErrorState`/
+`EmptyState`/`InlineLoading` — every data-fetching screen uses these
+instead of ad-hoc loading text), `ConfirmDialog.tsx` (consequential
+actions only — resolve/cancel a case, not every mutation), `FormField.tsx`
+(label + error + hint wrapper), `SearchSelect.tsx` (search-as-you-type
+picker against a real list endpoint — used for every "pick an existing
+X" flow), `ToastProvider.tsx` (global feedback for mutation success/
+error, separate from inline field validation).
 
-Everything from session 1's "Current status" still holds (server ↔
-Postgres, desktop Electron launch under Xvfb, mobile Metro bundler) and
-was spot-checked again this session. New this session:
+### 17.5 Navigation
 
-- `pnpm -r typecheck` from repo root — all 4 packages (shared, server,
-  desktop, mobile) clean, including `apps/server/tsconfig.test.json`
-  (tests typecheck too, not just `src`).
-- `pnpm --filter @msph/server test` — 36/36 passing.
-- Full manual curl walkthrough of the brief's exact "Done criteria" list
-  against a running dev server (start Postgres → migrate → seed → start
-  server → login as admin → login as worker → worker denied `/users`
-  (403) → create case → schedule visit assigned to worker → case status
-  NEW→SCHEDULED confirmed → worker denied case access before assignment
-  (403) → worker granted after assignment (200) → worker starts visit →
-  worker completes visit with inspection fields → case status
-  SCHEDULED→IN_PROGRESS confirmed → admin adds treatment → worker records
-  it performed → worker adds photo metadata → worker denied adding a
-  treatment (403, admin-only) → full timeline fetched and read back in
-  order → worker denied resolving (403) → admin resolves → resolved case
-  rejects a new visit (400) → refresh-token rotation + reuse-detection
-  both confirmed live → rate limiter confirmed live (429 after 20
-  attempts in 15 min)). This is the same walkthrough the automated tests
-  now cover, run once by hand first to catch what tests alone might miss
-  (real HTTP headers, real timing, the cuid-validation bug in 3.6 was
-  actually found this way, before tests were even written).
-- Dev database (`msph_dev`) reset and reseeded clean at the end of the
-  session — contains exactly the seed script's fixtures, no leftover
-  manual-testing cruft.
-- All background processes (dev server, etc.) stopped after verification.
+`apps/desktop/src/components/AppShell.tsx` — sidebar with exactly the
+brief's 8 items, in French: Tableau de bord, Dossiers, Calendrier,
+Clients, Propriétés, Traitements, Intervenants, Paramètres. **No
+"Landlords" top-level item** — deliberate, matches the brief's explicit
+nav list (which doesn't include one); landlord data is managed inline
+wherever a property needs it instead (17.10). Sidebar footer shows the
+logged-in user + a one-click logout. Topbar shows the current page's
+French title.
 
-**Still not done**: desktop/mobile don't call any of this API yet beyond
-the session-1 health check. No storage driver (photos are metadata-only).
-No ESLint. See Next steps.
+### 17.6 Dashboard (`src/pages/DashboardPage.tsx`)
 
-## 13. Known issues / gotchas
+Answers every question the brief lists, from real data, nothing
+fabricated:
 
-Session 1's gotchas (9.1–9.5 in the previous revision of this file) still
-apply unchanged — Electron `.cts`→`.cjs` requirement, the `packageManager`
-pin, the harmless `@types/react-dom` peer warning, no ESLint yet, desktop's
-redundant `tsc -b` emit. Not repeated here in full; read the git history
-of this file (or just trust that the fixes described there are still in
-place — nothing this session touched apps/desktop or apps/mobile).
+- **Nouveaux dossiers** — `GET /cases?status=NEW` total.
+- **Visites aujourd'hui** — `GET /visits?from=<today start>&to=<today
+  end>` total.
+- **Visites à venir** — `GET /visits?status=SCHEDULED&from=<tomorrow>`
+  total.
+- **Dossiers non résolus / résolus** — sums/totals of the status-filtered
+  case queries.
+- **Dossiers nécessitant de l'attention** — cases with `priority` HIGH/
+  URGENT among the non-terminal statuses (three parallel queries merged
+  client-side, since the list endpoint filters by one status at a time —
+  not a backend limitation worth "fixing" for a dashboard read).
+- **En attente de suivi** — a genuinely derived view, not a stored field:
+  IN_PROGRESS cases that have **no upcoming SCHEDULED visit**, computed
+  by cross-referencing `GET /cases?status=IN_PROGRESS` against
+  `GET /visits?status=SCHEDULED` (set of case ids with a pending visit).
+  This is exactly "waiting for follow-up" — something happened, nothing
+  more is on the books yet.
+- **Activité d'aujourd'hui** — every visit scheduled today with its
+  current status, customer, property, worker — the honest,
+  backend-supported version of a "today's activity feed" (there is no
+  global cross-case activity endpoint, only per-case timelines — see
+  section 8 — so this section is visit-centric rather than a fabricated
+  unified feed).
 
-**New this session:**
+### 17.7 Realtime — see section 4.
 
-- **`z.coerce.boolean()` is a trap for query params** — fixed via
-  `booleanQueryParam` in shared validation (section 10). If you ever add
-  another boolean query filter, use that, not `z.coerce.boolean()`.
-- **Service-layer return types are NOT annotated with the shared "wire"
-  entity types** (`Customer`, `User`, `Treatment`, etc.) — those types
-  describe the post-`JSON.stringify()` shape (ISO date strings); Prisma
-  returns real `Date` objects. Annotating e.g. `getCustomer(id):
-  Promise<Customer>` is a type lie that `tsc` correctly rejects (hit and
-  fixed this exact error across 6 files this session). Service functions
-  are left to infer Prisma's actual return shape; `res.json()` performs
-  the real Date→string conversion at the actual API boundary, where the
-  shared type's contract genuinely applies. See the comment atop
-  `customers.service.ts` for the canonical explanation, referenced from
-  the other service files.
-- **`tsc -b`'s `rootDir: "src"` can't also typecheck `tests/`** — solved
-  with a separate `tsconfig.test.json` (`include: ["src", "tests"]`,
-  `noEmit: true`, no `rootDir`/`outDir`) run as a second step in the
-  `typecheck` script.
-- **`tsx watch` watches across the workspace symlink into
-  `packages/shared/dist`**, which is neat (edit shared, server hot
-  -reloads) but means rebuilding shared while the dev server is running
-  can race: `rm -rf dist && tsc -b` triggers tsx's restart on the
-  `unlink` the instant `dist/index.js` disappears, before `tsc` finishes
-  recreating it, crashing with `ERR_MODULE_NOT_FOUND`. Not a bug in the
-  app — just kill the dev server before rebuilding shared, then start it
-  fresh, rather than expecting the watcher to survive the rebuild.
-- **Prisma's `Json?` field type (`Prisma.InputJsonValue`) does not
-  include `null`** the way you'd expect (`null` needs the separate
-  `Prisma.JsonNull` sentinel) — `CaseActivity.metadata`'s type is
-  `Record<string, Prisma.InputJsonValue>`, so a call site that might
-  otherwise pass `workerId: string | null` conditionally spreads the key
-  in instead (`...(x ? {workerId: x} : {})`) rather than ever assigning
-  `null` into it. See `visits.service.ts`'s `updateVisit`.
+### 17.8 Cases list (`src/pages/cases/CasesListPage.tsx`)
 
-## 14. Next steps (recommended order for the next session)
+Every column the brief asked for: status, customer, property/city,
+problem, assigned worker, next consultation, last activity, priority.
+"Assigned worker" / "next consultation" are cross-referenced from
+`GET /visits?status=SCHEDULED` the same way as the dashboard's follow-up
+section (the list endpoint itself only returns customer+property, not
+visit data — a visit-level fact, correctly not duplicated onto the case
+row server-side). "Dernière activité" uses `Case.updatedAt` — an honest
+approximation (touched by status changes, not by every single visit
+edit) called out as such in the code comment, not oversold as a precise
+audit trail (that's what the case detail's own timeline is for).
+Search (server-side, via the `search` query param), status filter
+(pills, server-side), priority filter (client-side — not a server query
+param), sortable columns (client-side, on the current page).
 
-1. **Wire the desktop UI to the real API.** `CasesPage`, a real case
-   detail screen (timeline from `GET /cases/:id/timeline` + the brief's
-   visual request→consultation→inspection→treatment→follow-up→resolution
-   flow, built from the ordered `visits`/`activities` arrays — the data
-   for this now fully exists), `CustomersPage`, `PropertiesPage`,
-   `LandlordsPage`, `WorkersPage`, `TreatmentsPage`, a real login screen
-   (JWT storage — likely `localStorage` or Electron's `safeStorage` via a
-   preload-exposed API, access-token refresh-on-401 interceptor around
-   `lib/api.ts`). `DashboardPage`'s bucket counts can finally be wired to
-   `GET /cases?status=X`.
-2. **Wire the mobile UI to the real API.** Real login (`app/login.tsx`
-   currently a no-op stub), Today/Upcoming screens from
-   `GET /visits?assignedWorkerId=me&from=...&to=...` (note: workers'
-   `assignedWorkerId` is forced server-side, so the client doesn't even
-   need to pass its own id — any value works, but passing the real one is
-   clearer), visit detail screen wired to start/complete/inspection/
-   photos, JWT storage via `expo-secure-store` (not installed yet —
-   `AsyncStorage`/`localStorage` are not appropriate for refresh tokens
-   on a phone).
-3. **Wire Socket.IO on the client side** — join `cases` room on
-   dashboard mount, `case:${id}` room on case-detail mount (desktop);
-   consider whether mobile needs it at all yet (Today screen could just
-   poll, given field connectivity is often spotty — reconnect-heavy
-   Socket.IO on cellular may be more trouble than it's worth for v1;
-   decide when building it, don't assume).
-4. **Storage driver** (section 5): build
-   `apps/server/src/storage/index.ts` (a `StorageDriver` interface —
-   `put`, `getUrl`, maybe `delete`) + `LocalStorageDriver`, then a real
-   binary upload endpoint (multipart, `multer` or Busboy) that returns a
-   `storageKey` for `POST /visits/:id/photos` to consume. Wire mobile's
-   camera capture (`expo-image-picker` is already a dependency, Android
-   `CAMERA` permission already declared in `app.json`).
-5. **ESLint/Prettier** (carried over from session 1, still not done).
-6. Eventually: S3/R2 storage driver, email ingestion, calendar view,
-   Electron packaging (`electron-builder`) for distributable installers,
-   an `OWNER` role tier if the business ever needs one (see 3.2).
+### 17.9 New Case workflow (`src/pages/cases/CaseNewPage.tsx`)
 
-## 15. Commands reference
+A dedicated full-page route (`/dossiers/nouveau`), not a modal — the form
+is large enough (customer, property, landlord, problem, initial
+consultation) to want the room. Exercises the flexible `createCaseSchema`
+(3.8) properly: a "Client existant / Nouveau client" toggle
+(`SearchSelect` vs. plain fields), same for property, and for the
+property's landlord a three-way "Aucun / Nouveau bailleur / Bailleur
+existant" choice — the landlord picker searches the still-live
+`GET /landlords` endpoint (no dedicated page, see 17.10). Client-side
+validation runs the exact same `createCaseSchema` the server uses before
+submitting, via `zod`'s `safeParse` + `formErrors.ts`, so a rejected
+submission shows field-level French-adjacent errors immediately rather
+than round-tripping to the server for basic mistakes (server-side
+validation still runs and is still authoritative — this is a UX layer on
+top, not a replacement). Can optionally schedule the initial consultation
+(date/time/worker) in the same submission, matching `createCaseSchema`'s
+`initialVisitScheduledAt`/`assignedWorkerId` fields.
+
+### 17.10 Case detail (`src/pages/cases/CaseDetailPage.tsx` + colocated modals) — the centerpiece
+
+All 9 sections the brief asked for, laid out as: a header (status,
+priority, customer name as the page title, property/worker/next-visit
+facts, action buttons), the visual workflow stepper (3.1), then a
+2-column body — main column (Visites et inspections, Traitements,
+Photos, Historique) + a narrower side column (Client, Propriété,
+**Bailleur** — nested under Propriété since there's no separate landlord
+page, Problème).
+
+- **Visites et inspections** are one section, not two — each visit card
+  shows its own inspection inline (observations/remarks/condition) once
+  completed, which is more useful than a disconnected flat inspection
+  list (an inspection is 1:1 with a visit and meaningless without its
+  context). Per-visit actions: Démarrer / Terminer (the latter opens
+  `CompleteVisitModal`, capturing the inspection fields in the same step
+  — mirrors the brief's mobile-app flow), Modifier (reschedule/reassign/
+  cancel via `EditVisitModal`, admin-only per the backend), and Ajouter
+  une photo.
+- **Traitements**: add via `TreatmentPickerModal` (catalog search +
+  notes), mark performed, remove — maps directly to `POST/PATCH/DELETE
+  /cases/:id/treatments[...]`.
+- **Photos**: metadata cards (no real images — see section 5), grouped
+  at the case level even though each is tied to a specific visit.
+- **Historique**: the full `CaseActivity` feed, French (3.11).
+- **Actions row**: Planifier une visite, Choisir un traitement, Marquer
+  résolu, Annuler — hidden once the case is RESOLVED/CANCELLED, replaced
+  by a single Réouvrir button. Resolve/cancel/reopen go through
+  `ConfirmDialog` (a case status change isn't a one-click-and-done
+  action).
+
+### 17.11 Calendar (`src/pages/calendar/CalendarPage.tsx`)
+
+Month grid (date-fns for the grid math + French month/weekday names),
+worker filter, click an event to preview it (customer, property, date,
+worker, status) with "Reprogrammer" (opens the same `EditVisitModal` used
+in the case detail page — one modal, two entry points) and "Voir le
+dossier" actions. Completed/cancelled visits render struck-through so a
+glance at the month shows what's still actually pending.
+
+### 17.12 Customers / Properties / Treatments / Intervenants (workers)
+
+Four structurally similar CRUD pages — table + search + a slide-in
+`Drawer` form for create/edit. Properties' drawer includes the same
+landlord picker pattern as the New Case page, but since `POST
+/properties` (unlike `POST /cases`) only accepts an existing
+`landlordId`, not a nested new-landlord object (see session 2's
+`createPropertySchema`), choosing "Nouveau bailleur" here does a small
+client-side two-step: `POST /landlords` first, then use the returned id
+— documented in the component, not a silent workaround.
+Intervenants (`WorkersPage.tsx`) manages both ADMIN and WORKER accounts
+(role filter pills) since that's what `/users` is actually for; titled
+"Intervenants" to match the brief's nav label. Treatments' drawer covers
+every field the brief lists (name, description, instructions, duration,
+safety information) plus an active/inactive toggle wired to
+`PATCH /treatments/:id`'s `active` field (the brief's "activate/
+deactivate procedure").
+
+### 17.13 Settings (`src/pages/settings/SettingsPage.tsx`)
+
+Account summary + change-password form (wired to `POST
+/auth/change-password`, section 6) + logout. Deliberately small — the
+brief didn't ask for more here, and there's no app-level "settings" to
+speak of yet (no theme, no locale switch — the whole app is French,
+full stop).
+
+### 17.14 Verification performed this session
+
+Not just typechecked — actually run and driven, end to end:
+
+- `pnpm -r typecheck` from repo root: all 4 packages clean.
+- `pnpm --filter @msph/desktop build`: Vite renderer + both Electron
+  `tsc` passes succeed.
+- `pnpm --filter @msph/server test`: 36/36 still passing after the
+  socket-room fix (3.12).
+- **A full Playwright-driven E2E run** against the real dev server + the
+  real Vite-served desktop app (Chromium, not a mock DOM), scripted to
+  match the brief's exact Done Criteria list:
+  1. Load the app → French login screen.
+  2. Log in as `admin@msph.local`.
+  3. Dashboard stat tiles show real (non-placeholder) numbers.
+  4. Navigate to Dossiers → Nouveau dossier.
+  5. Fill the full New Case form (new customer, new property, priority
+     Urgente, schedule the initial consultation, assign a worker) and
+     submit.
+  6. Land on the new case's detail page; confirm status badge = Planifié,
+     one visit card present.
+  7. **Simulate the mobile app** (which doesn't exist as a real app yet)
+     by having a second, independent API session log in as
+     `worker@msph.local` and call `start`/`complete` on that visit
+     directly — exactly the brief's "Worker completes inspection on
+     mobile" scenario, at the API layer since the actual mobile UI isn't
+     built.
+  8. **Without touching the still-open desktop page**: wait for and
+     confirm the status badge flips to En cours, the workflow stepper
+     advances to Inspection, and the visit card shows the inspection
+     text that was just submitted — via Socket.IO, no reload. This is
+     the realtime requirement, proven, not assumed.
+  9. Back in the UI: choose a treatment, mark it performed, schedule a
+     follow-up visit (second visit card appears).
+  10. Confirm a WORKER account is refused (403) when attempting to mark
+      the case resolved via the API (the desktop UI doesn't even show
+      that button to a worker, but the guard is also server-side).
+  11. Click Marquer résolu, confirm the dialog, confirm the status badge
+      flips to Résolu and a new visit is rejected (terminal state).
+  12. Read back the full Historique — every step appears, in French, in
+      the right order.
+  - All 15 steps passed. Screenshots taken at each major step (not
+    committed — ephemeral verification artifacts, described here instead
+    since the visual result is what matters for future reference: dense,
+    professional, exactly matches the design direction — dark sidebar,
+    flat bordered cards, small-radius badges, no gradients).
+- **A real Electron launch** (not just the Vite dev page in a browser
+  tab), under `xvfb-run` as in session 1 — confirmed no application-level
+  JS errors in the console, only the same container-only Chromium/GPU/
+  dbus noise session 1 already documented as harmless.
+- Two real bugs found and fixed by this testing (not hypothetical) — 3.12
+  (socket room) and the `pageSize` cap bug below.
+
+### 17.15 Bugs found and fixed this session
+
+- **3.12** — Socket.IO `cases` room never joined (backend fix).
+- **`pageSize` over the server's cap**: `CasesListPage`'s cross-reference
+  query requested `pageSize: 200` and `CalendarPage` requested `pageSize:
+  300` against an endpoint whose `paginationQuerySchema` caps `pageSize`
+  at 100 — both silently 400'd (visible in the server's dev log, caught
+  because the E2E test's console-error listener flagged it, not because
+  anything visibly broke in the UI — react-query just showed an empty
+  list where data should have been). Fixed by capping both at 100, with
+  a comment noting the ceiling and that it's the first thing to revisit
+  if visit volume ever grows past it at this company's scale.
+- **French grammar in the activity timeline** — see 3.11's "Suivi
+  planifiée" note.
+
+## 18. Next steps (recommended order for the next session)
+
+1. **Mobile app** — same treatment as this session but for
+   `apps/mobile`: real login (`expo-secure-store` for the refresh token,
+   not `AsyncStorage`), Today/Upcoming screens from `GET /visits`, visit
+   detail wired to start/complete/inspection/photos, camera capture once
+   the storage driver (next item) exists. Once mobile is real, redo the
+   17.14 E2E scenario using the actual mobile UI instead of a raw API
+   call standing in for it.
+2. **Storage driver** (section 5): `apps/server/src/storage/` (a
+   `StorageDriver` interface + `LocalStorageDriver`), a real multipart
+   upload endpoint, then wire both the desktop's `AddPhotoModal` and
+   mobile's camera capture to it instead of the current
+   type-a-reference-by-hand placeholder.
+3. **Socket.IO auth** — connections are currently unauthenticated (noted
+   in `socket.ts`'s doc comment). Low priority while the payloads stay
+   minimal (`{caseId}`/`{caseId, visitId}`, no sensitive data), but worth
+   closing before this ships beyond internal use.
+4. **ESLint/Prettier** — carried over from sessions 1-2, still not done.
+5. **Electron packaging** (`electron-builder`) for distributable
+   installers — nothing done here yet, dev-mode only.
+6. Eventually: S3/R2 storage driver, email ingestion, an `OWNER` role
+   tier if the business ever needs one (3.2), a real accessibility pass
+   on `SearchSelect`/`Modal`/`Drawer` (currently mouse-driven, functional
+   but not keyboard-exhaustive beyond Escape-to-close).
+7. Smaller desktop polish worth a look next time, not urgent: the cases
+   list's "last activity" column could use a real per-case last-activity
+   timestamp if a cheap backend query for it ever gets added (see
+   17.8's honesty note about `Case.updatedAt` being an approximation);
+   pagination controls on Customers/Properties/Treatments/Intervenants
+   pages currently just load up to 100 and don't paginate further (fine
+   at this company's scale, revisit if that stops being true).
+
+## 19. Commands reference
 
 ```bash
 # Install everything (run from repo root)
@@ -642,14 +685,15 @@ DATABASE_URL="postgresql://msph:msph_dev_password@localhost:5432/msph_test?schem
 
 # Dev servers
 pnpm dev:server      # http://localhost:4000, health at /api/health
-pnpm dev:desktop     # Electron + Vite
+pnpm dev:desktop     # Electron + Vite (or just `pnpm --filter @msph/desktop exec vite`
+                     # for the renderer alone in a browser tab, useful for quick checks)
 pnpm dev:mobile      # Expo — scan QR or press w/a/i in the terminal
 
 # Checks
 pnpm typecheck                                   # every package
 pnpm --filter @msph/server test                  # backend test suite
 pnpm --filter @msph/server prisma:studio         # DB browser GUI
-pnpm --filter @msph/desktop build                # production build check
+pnpm --filter @msph/desktop build                # production build check (Vite + both Electron tsc passes)
 pnpm --filter @msph/mobile exec expo export --platform web   # bundle check
 
 # Local Postgres in THIS dev container (already created)
@@ -661,10 +705,18 @@ service postgresql start
 # worker@msph.local / ChangeMe123! (WORKER)
 ```
 
-## 16. Environment variables
+## 20. Environment variables
 
-See `.env.example` at repo root for the full documented list — copy it to
-`apps/server/.env` and fill in real values. Never commit `.env` files
-(already gitignored) or hardcode secrets in code. Test env vars are
-injected directly by `vitest.config.ts`, not read from a file — see
-section 11.
+See `.env.example` at repo root for the full documented server list —
+copy it to `apps/server/.env` and fill in real values. Never commit
+`.env` files (already gitignored) or hardcode secrets in code.
+
+Desktop-specific (optional, both have sane localhost defaults — see
+`apps/desktop/src/vite-env.d.ts`):
+
+- `VITE_API_BASE_URL` — defaults to `http://localhost:4000/api`.
+- `VITE_SOCKET_URL` — defaults to `VITE_API_BASE_URL` with the trailing
+  `/api` stripped.
+
+Set these via a `.env` file in `apps/desktop/` (Vite's standard
+mechanism) if the server ever runs somewhere other than localhost:4000.

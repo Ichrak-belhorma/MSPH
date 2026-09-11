@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from "electron";
 import path from "node:path";
+import { registerSecureStorageIpc } from "./secureStorage.cjs";
 
 // Compiled to CommonJS (see tsconfig.electron.json), so __dirname is
 // available natively at runtime.
@@ -28,6 +29,7 @@ function createMainWindow(): void {
 }
 
 app.whenReady().then(() => {
+  registerSecureStorageIpc();
   createMainWindow();
 
   app.on("activate", () => {

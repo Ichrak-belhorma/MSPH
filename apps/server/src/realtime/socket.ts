@@ -26,6 +26,14 @@ export function initSocket(httpServer: HttpServer): SocketIOServer {
   io.on("connection", (socket) => {
     logger.debug("Socket connected", { socketId: socket.id });
 
+    // Every connected client gets list/dashboard-level updates — there's
+    // no per-user filtering to do here (Socket.IO connections aren't
+    // authenticated yet, see CONTEXT.md "Realtime"), and any screen that's
+    // open wants to know a case changed. Case-*detail*-level updates are
+    // still opt-in per case via JOIN_CASE_ROOM below, so a client watching
+    // one case doesn't need to filter a firehose of unrelated visit events.
+    socket.join(CASES_ROOM);
+
     socket.on(SOCKET_EVENTS.JOIN_CASE_ROOM, (caseId: string) => {
       socket.join(`case:${caseId}`);
     });
