@@ -21,7 +21,16 @@ import type {
 } from "@msph/shared";
 import { requireAdmin, requireAuth } from "../../middleware/auth.js";
 import { body, query, validateBody, validateQuery } from "../../middleware/validate.js";
-import { emitVisitUpdated } from "../../realtime/socket.js";
+import {
+  emitCaseStatusChanged,
+  emitInspectionCreated,
+  emitPhotoAdded,
+  emitVisitAssigned,
+  emitVisitCompleted,
+  emitVisitCreated,
+  emitVisitStarted,
+  emitVisitUpdated,
+} from "../../realtime/socket.js";
 import { ApiError } from "../../middleware/errorHandler.js";
 import * as visitsService from "./visits.service.js";
 
@@ -55,8 +64,16 @@ visitsRouter.get("/", validateQuery(visitListQuerySchema), async (req, res, next
 
 visitsRouter.post("/", requireAdmin, validateBody(scheduleVisitSchema), async (req, res, next) => {
   try {
-    const visit = await visitsService.scheduleVisit(body<ScheduleVisitInput>(req), req.user!.id);
-    emitVisitUpdated(visit.caseId, visit.id);
+    const input = body<ScheduleVisitInput>(req);
+    const { visit, statusChange } = await visitsService.scheduleVisit(input, req.user!.id);
+    // Scenario 2 / Scenario 5 (follow-up): a new visit was scheduled —
+    // VISIT_CREATED, not the old (buggy) VISIT_UPDATED, so a client can
+    // tell "a visit now exists" apart from "a visit changed". If it came
+    // with an assigned worker, that worker's device specifically wants
+    // VISIT_ASSIGNED to know "you have a new visit" without diffing.
+    emitVisitCreated(visit.caseId, visit.id);
+    if (input.assignedWorkerId) emitVisitAssigned(visit.caseId, visit.id, input.assignedWorkerId);
+    if (statusChange) emitCaseStatusChanged(visit.caseId, statusChange.from, statusChange.to);
     res.status(201).json(visit);
   } catch (err) {
     next(err);
@@ -75,8 +92,21 @@ visitsRouter.get("/:id", async (req, res, next) => {
 visitsRouter.patch("/:id", requireAdmin, validateBody(updateVisitSchema), async (req, res, next) => {
   try {
     const id = cuidSchema.parse(req.params.id);
-    const visit = await visitsService.updateVisit(id, body<UpdateVisitInput>(req), req.user!.id);
-    emitVisitUpdated(visit.caseId, visit.id);
+    const { visit, statusChange, workerAssignmentChanged, assignedWorkerId } = await visitsService.updateVisit(
+      id,
+      body<UpdateVisitInput>(req),
+      req.user!.id,
+    );
+    // A reassignment is the specific thing a worker's device cares about
+    // (Scenario 2); anything else (reschedule, notes, cancel/no-show)
+    // is the generic VISIT_UPDATED — both are never emitted for the same
+    // change, so a listener sees exactly one event per actual edit.
+    if (workerAssignmentChanged) {
+      emitVisitAssigned(visit.caseId, visit.id, assignedWorkerId);
+    } else {
+      emitVisitUpdated(visit.caseId, visit.id);
+    }
+    if (statusChange) emitCaseStatusChanged(visit.caseId, statusChange.from, statusChange.to);
     res.json(visit);
   } catch (err) {
     next(err);
@@ -86,8 +116,10 @@ visitsRouter.patch("/:id", requireAdmin, validateBody(updateVisitSchema), async 
 visitsRouter.post("/:id/start", validateBody(startVisitSchema), async (req, res, next) => {
   try {
     const id = cuidSchema.parse(req.params.id);
-    const visit = await visitsService.startVisit(id, body<StartVisitInput>(req), req.user!);
-    emitVisitUpdated(visit.caseId, visit.id);
+    const { visit, statusChange } = await visitsService.startVisit(id, body<StartVisitInput>(req), req.user!);
+    // Scenario 3: worker starts a visit -> desktop receives VISIT_STARTED.
+    emitVisitStarted(visit.caseId, visit.id);
+    if (statusChange) emitCaseStatusChanged(visit.caseId, statusChange.from, statusChange.to);
     res.json(visit);
   } catch (err) {
     next(err);
@@ -97,8 +129,19 @@ visitsRouter.post("/:id/start", validateBody(startVisitSchema), async (req, res,
 visitsRouter.post("/:id/complete", validateBody(completeVisitSchema), async (req, res, next) => {
   try {
     const id = cuidSchema.parse(req.params.id);
-    const visit = await visitsService.completeVisit(id, body<CompleteVisitInput>(req), req.user!);
-    emitVisitUpdated(visit.caseId, visit.id);
+    const { visit, statusChange, inspectionRecorded } = await visitsService.completeVisit(
+      id,
+      body<CompleteVisitInput>(req),
+      req.user!,
+    );
+    // Scenario 4: worker completes inspection -> desktop receives
+    // INSPECTION_CREATED (when observations/remarks/condition were
+    // submitted in this call, per CompleteVisitInput's doc comment) and
+    // VISIT_COMPLETED. Photos are a separate endpoint/event (PHOTO_ADDED,
+    // below) even when uploaded around the same moment in the UI.
+    if (inspectionRecorded) emitInspectionCreated(visit.caseId, visit.id);
+    emitVisitCompleted(visit.caseId, visit.id);
+    if (statusChange) emitCaseStatusChanged(visit.caseId, statusChange.from, statusChange.to);
     res.json(visit);
   } catch (err) {
     next(err);
@@ -108,7 +151,8 @@ visitsRouter.post("/:id/complete", validateBody(completeVisitSchema), async (req
 visitsRouter.post("/:id/inspection", validateBody(recordInspectionSchema), async (req, res, next) => {
   try {
     const id = cuidSchema.parse(req.params.id);
-    const inspection = await visitsService.recordInspection(id, body<RecordInspectionInput>(req), req.user!);
+    const { inspection, caseId } = await visitsService.recordInspection(id, body<RecordInspectionInput>(req), req.user!);
+    emitInspectionCreated(caseId, id);
     res.status(201).json(inspection);
   } catch (err) {
     next(err);
@@ -119,6 +163,7 @@ visitsRouter.post("/:id/photos", validateBody(addVisitPhotoSchema), async (req, 
   try {
     const id = cuidSchema.parse(req.params.id);
     const photo = await visitsService.addPhotoToVisit(id, body<AddVisitPhotoInput>(req), req.user!);
+    emitPhotoAdded(photo.caseId, photo.visitId, photo.id);
     res.status(201).json(photo);
   } catch (err) {
     next(err);
@@ -147,6 +192,7 @@ visitsRouter.post("/:id/photos/upload", upload.single("photo"), async (req, res,
       { buffer: req.file.buffer, originalName: req.file.originalname, mimeType: req.file.mimetype, caption },
       req.user!,
     );
+    emitPhotoAdded(photo.caseId, photo.visitId, photo.id);
     res.status(201).json(photo);
   } catch (err) {
     next(err);

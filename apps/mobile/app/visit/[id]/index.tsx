@@ -64,6 +64,23 @@ export default function VisitDetailScreen() {
           <Text style={styles.scheduled}>{formatDateTime(visit.scheduledAt)}</Text>
         </View>
 
+        {kase && (kase.status === "RESOLVED" || kase.status === "CANCELLED") && (
+          // Scenario 6 ("both applications display RESOLVED"): mobile
+          // otherwise never surfaces case-level status (deliberately —
+          // it's a visit-focused app, not a case-administration one, see
+          // CONTEXT.md "Mobile application"), but a worker opening a
+          // visit on a since-resolved/cancelled case needs to know that
+          // at a glance rather than being confused when there's nothing
+          // left to do. Updates live via the same CASE_STATUS_CHANGED/
+          // CASE_RESOLVED realtime handling as everything else on this
+          // screen — no dedicated wiring needed beyond this banner.
+          <Card style={kase.status === "RESOLVED" ? styles.resolvedBanner : styles.closedNoticeCard}>
+            <Text style={kase.status === "RESOLVED" ? styles.resolvedText : styles.closedNotice}>
+              {kase.status === "RESOLVED" ? "✓ Ce dossier a été marqué résolu." : "Ce dossier a été annulé."}
+            </Text>
+          </Card>
+        )}
+
         <Card>
           <SectionTitle>Client</SectionTitle>
           <Text style={styles.name}>{fullName(visit.case.customer)}</Text>
@@ -249,6 +266,9 @@ const styles = StyleSheet.create({
   valueMuted: { fontSize: 14, color: COLORS.textMuted, marginTop: 2 },
   fieldLabel: { fontSize: 12, fontWeight: "700", color: COLORS.textMuted, marginBottom: 2 },
   closedNotice: { color: COLORS.textMuted, fontSize: 14, textAlign: "center" },
+  closedNoticeCard: {},
+  resolvedBanner: { backgroundColor: COLORS.successBg, borderColor: COLORS.success },
+  resolvedText: { color: COLORS.success, fontSize: 14, fontWeight: "700", textAlign: "center" },
   actionsGrid: { flexDirection: "row", gap: SPACING.sm },
   section: { marginTop: SPACING.sm },
   previousCard: { marginBottom: SPACING.sm },

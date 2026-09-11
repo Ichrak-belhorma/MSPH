@@ -4,11 +4,15 @@
 persistent memory of the project. Do not redo completed work — check
 "Current status" and "Next steps" first and continue from there.
 
-Last updated: 2026-09-11 (session 4 — mobile application: full French
-worker app wired to the real API, real photo upload + storage driver,
-realtime, offline-safe drafts). Previous: session 3 — desktop
-application: full French UI wired to the real API, realtime, Electron
-security.
+Last updated: 2026-09-11 (session 5 — cross-client synchronization: a
+granular Socket.IO event taxonomy replacing the old 4-event "everything
+changed" design, threaded through the desktop and mobile realtime
+providers, a new committed server-side realtime test suite, and a
+13-step live desktop+mobile Playwright verification of the full
+manager+worker scenario). Previous: session 4 — mobile application: full
+French worker app wired to the real API, real photo upload + storage
+driver, realtime, offline-safe drafts. Session 3 — desktop application:
+full French UI wired to the real API, realtime, Electron security.
 
 ---
 
@@ -229,61 +233,198 @@ by construction (same server code, same tests — see section 8/backend
 test count, unchanged at 36/36) rather than by writing new
 worker-permission tests specifically for mobile.
 
-## 4. Realtime design (Socket.IO)
+### 3.16 Realtime events emit after the transaction commits, never inside it (session 5)
 
-Session 2 wired the server-side emits (`emitCaseCreated/emitCaseUpdated/
-emitVisitCreated/emitVisitUpdated`, called from cases/visits/
-case-treatments routes). **Session 3 fixed the `cases`-room bug (3.12)
-and wired the desktop client**:
+Every socket event this session added follows the same rule: the
+service function computes what happened (including whether
+`Case.status` actually changed, via `case-status.ts`'s now-non-`void`
+return — see section 4.4) *inside* its Prisma transaction, but the
+**route handler**, after `await`-ing the service call (transaction
+already committed), decides which `emitXxx()` call(s) to make. No
+`emitXxx()` call exists inside a `prisma.$transaction(...)` callback
+anywhere in the codebase. **Why**: a transaction can still roll back
+after its callback runs (a later statement in the same transaction
+throws) — emitting from inside it would risk telling every connected
+client about a change that the database itself then discards. This
+was a deliberate design constraint from the start of the refactor, not
+a bug found and fixed — see section 4 for the full event architecture
+this enabled, and section 19 for the session's build log.
 
-- `apps/desktop/src/lib/socket.ts` — one shared `socket.io-client`
-  connection, connected on login, disconnected on logout (not per-screen).
-  Not authenticated (server doesn't support it yet — noted as a gap in
-  the file's own doc comment, not silently ignored).
-- `apps/desktop/src/realtime/RealtimeProvider.tsx` — mounted once near
-  the app root (inside `AuthProvider`). Listens for the four events and
-  calls `queryClient.invalidateQueries()` on the relevant react-query keys
-  (`api/queryKeys.ts`) — **invalidates and refetches, never patches the
-  cache by hand**, since the socket payloads are intentionally minimal
-  (`{caseId}` / `{caseId, visitId}`) and the real GET response is the only
-  actual source of truth for what changed.
+### 3.17 No optimistic UI anywhere, on either client (session 5, confirmed)
+
+Checked as part of this session's "never treat local UI state as
+authoritative" focus: neither `apps/desktop` nor `apps/mobile` updates
+what the user sees before the server responds to a mutation — every
+`useMutation` renders its loading/pending state and waits for the real
+response (or a realtime-triggered refetch) rather than assuming success
+and patching the local cache first. This was already true from sessions
+3-4 (not a change made this session) — recorded here because it's the
+precondition that makes the "backend is authoritative, clients refetch"
+rule in section 4.1 actually hold in practice, and worth confirming
+explicitly rather than assuming, given this session's specific focus on
+data consistency.
+
+## 4. Realtime design (Socket.IO) — event architecture (session 5 rewrite)
+
+This section is the canonical reference for the realtime contract.
+Sessions 2-4 built a working but coarse version (four events: case/visit
+created/updated). **Session 5's whole focus was synchronization** — it
+replaced that with a granular event taxonomy, fixed a real bug the old
+design had (`scheduleVisit` emitted `VISIT_UPDATED` for a brand-new
+visit), and added a committed, repeatable test suite plus a live
+cross-client verification. See section 19 for the full session-5 build
+log, bugs found, and test results — this section documents the resulting
+*design*, kept current rather than a session-by-session diff.
+
+### 4.1 The single source of truth
+
+**PostgreSQL, via the Express API, is the only source of truth.**
+Neither desktop nor mobile ever treats its own local UI state as
+authoritative. Concretely:
+
+- Every mutation goes through a normal REST call (`POST`/`PATCH`/
+  `DELETE`), handled by a service function inside a Prisma transaction.
+  A mutation's HTTP response is itself already-fresh, authoritative data
+  — react-query's mutation `onSuccess`/`invalidate` handling never needs
+  to guess what changed.
+- A Socket.IO event is **only a hint that something changed**, carrying
+  ids (and, where useful, a small enum like a status) — **never** a full
+  record. See `packages/shared/src/constants/index.ts`'s payload
+  interfaces (`CaseEventPayload`, `VisitEventPayload`,
+  `CaseStatusChangedPayload`, etc.) — every one of them is `{caseId}`,
+  `{caseId, visitId}`, or a couple of ids plus one small field.
+- On receiving an event, both `RealtimeProvider`s (desktop and mobile)
+  call `queryClient.invalidateQueries(...)` — **they never patch the
+  cache by hand from the payload**. react-query then refetches from the
+  real API the next time the relevant query is observed, and the
+  server's own authorization (worker-scoped `assignedWorkerId` filtering,
+  `assertCaseAccess`/`assertVisitAccess`) decides what actually comes
+  back. This is what makes "avoid duplicated conflicting state" hold: a
+  client's cache is always either the last real server response, or
+  explicitly stale-and-about-to-refetch — never a hand-reconstructed
+  guess that could drift from the database.
+- Client-side optimistic UI is deliberately **not** used anywhere in this
+  codebase (checked as of session 5) — every mutation waits for the
+  server response before updating what the user sees. Slower than
+  optimistic updates, but it means there is no client-side reconciliation
+  logic to get wrong, and no window where two clients could show
+  contradictory "optimistic" states.
+
+### 4.2 Event taxonomy
+
+`packages/shared/src/constants/index.ts`'s `SOCKET_EVENTS` (session 5):
+
+```
+Case lifecycle:   CASE_CREATED, CASE_UPDATED, CASE_STATUS_CHANGED, CASE_RESOLVED
+Visit lifecycle:  VISIT_CREATED, VISIT_UPDATED, VISIT_ASSIGNED, VISIT_STARTED, VISIT_COMPLETED
+Inspection/photo: INSPECTION_CREATED, PHOTO_ADDED
+Treatments:       TREATMENT_ADDED, TREATMENT_UPDATED, TREATMENT_REMOVED
+Room housekeeping (client -> server): JOIN_CASE_ROOM, LEAVE_CASE_ROOM
+```
+
+`CASE_UPDATED`/`VISIT_UPDATED` are the **honest catch-all** for an edit
+that doesn't fit a more specific bucket (e.g. an admin editing
+`problemDescription`/`priority`, or rescheduling a visit's time/notes) —
+they are never used as a substitute for a more specific event when one
+applies (a status change always fires `CASE_STATUS_CHANGED`, never
+`CASE_UPDATED` too — see 4.4's exact per-action mapping). Every payload
+type is defined in the same file as `SocketEventPayloadMap`, so both the
+server's emit call sites and each client's `.on()` handlers are
+type-checked against the same contract — a payload-shape typo is a
+compile error, not a runtime surprise.
+
+### 4.3 Rooms (unchanged design, session 3's 3.12 bug fix still holds)
+
+Every connected socket joins a global `"cases"` room on connect (Socket
+.IO isn't authenticated yet, see 4.6 — there's no per-user room to scope
+to, and every open screen plausibly wants to know a case changed), plus
+an opt-in `case:${caseId}` room while a case detail screen is open
+(`JOIN_CASE_ROOM`/`LEAVE_CASE_ROOM`). **Every event broadcasts to both
+rooms** (`apps/server/src/realtime/socket.ts`'s `broadcast()` helper) —
+room membership is a convenience for a client to `.on()` fewer duplicate
+deliveries in the future if it ever needs to, not something the current
+clients rely on for correctness (both just listen globally after
+connecting).
+
+### 4.4 Server: what triggers what (the exact mapping)
+
+`apps/server/src/realtime/socket.ts` exports one `emitXxx()` helper per
+event. Each route handler calls the specific helper(s) that describe
+what actually happened, based on what its service function reports:
+
+| Action (route) | Event(s) emitted |
+|---|---|
+| `POST /cases` | `CASE_CREATED`; if `initialVisitScheduledAt` was given: `VISIT_CREATED`, and `VISIT_ASSIGNED` if a worker was given; `CASE_STATUS_CHANGED` if that pushed the case out of `NEW` |
+| `PATCH /cases/:id` | `CASE_STATUS_CHANGED` (+`CASE_RESOLVED` if the new status is `RESOLVED`) if `status` changed; otherwise `CASE_UPDATED` |
+| `POST /visits` (schedule) | `VISIT_CREATED`; `VISIT_ASSIGNED` if a worker was given; `CASE_STATUS_CHANGED` if the case's derived status changed |
+| `PATCH /visits/:id` (reschedule/reassign/cancel) | `VISIT_ASSIGNED` if `assignedWorkerId` changed; otherwise `VISIT_UPDATED`; plus `CASE_STATUS_CHANGED` if relevant |
+| `POST /visits/:id/start` | `VISIT_STARTED`; `CASE_STATUS_CHANGED` if relevant (rare — see 4.5) |
+| `POST /visits/:id/complete` | `INSPECTION_CREATED` if observations/condition/remarks were included in the same call; `VISIT_COMPLETED`; `CASE_STATUS_CHANGED` if relevant (typical — completing a visit usually moves `SCHEDULED` -> `IN_PROGRESS`) |
+| `POST /visits/:id/inspection` | `INSPECTION_CREATED` |
+| `POST /visits/:id/photos` and `/photos/upload` | `PHOTO_ADDED` |
+| `POST /cases/:id/treatments` | `TREATMENT_ADDED` |
+| `PATCH /cases/:id/treatments/:id` | `TREATMENT_UPDATED` |
+| `DELETE /cases/:id/treatments/:id` | `TREATMENT_REMOVED` |
+
+**How the server knows precisely** (session 5's actual refactor, not
+just new emit calls): `case-status.ts`'s `recalculateCaseStatus` and
+`applyExplicitStatus` — previously `void`-returning — now return
+`{from, to} | null` (`null` = no actual change). Every visits/cases
+service function that calls them (`scheduleVisit`, `updateVisit`,
+`startVisit`, `completeVisit`, `updateCase`) threads that result back up
+to its own return value (e.g. `ScheduleVisitResult { visit,
+statusChange }`), so the **route handler** — running *after* the Prisma
+transaction has committed — decides exactly which event(s) to emit from
+real, already-committed facts. Emitting *inside* the transaction was
+deliberately avoided: a socket event for a change that then rolls back
+would tell clients about something that never actually happened.
+
+### 4.5 A genuinely-tested nuance: derived case status doesn't over-fire
+
+`Case.status` is derived from visit history (3.1), not set directly
+except by an explicit admin action. A consequence proven by the session-5
+test suite (not assumed): starting a visit on a case that's already
+`SCHEDULED` (because that same visit already counted as "active") does
+**not** emit a spurious `CASE_STATUS_CHANGED` — `recalculateCaseStatus`
+correctly returns `null` because the derived bucket didn't move.
+Scheduling a second active visit (e.g. a follow-up on an `IN_PROGRESS`
+case) is the same story. Only a transition that actually crosses a
+bucket boundary (`NEW`->`SCHEDULED`, `SCHEDULED`/`NEW`->`IN_PROGRESS`, or
+an explicit resolve/cancel/reopen) fires the event — see
+`apps/server/tests/realtime.test.ts` for the exact assertions.
+
+### 4.6 Clients
+
+- `apps/desktop/src/realtime/RealtimeProvider.tsx` / `apps/mobile/
+  realtime/RealtimeProvider.tsx` — mounted once near each app's root.
+  Both connect the shared socket on login, disconnect on logout, and
+  `.on()` the full event set, each mapping every event to an
+  `invalidateQueries()` call via two small helpers (`invalidateCase`,
+  `invalidateVisit`) — see each file's own doc comment for *why* nearly
+  every specific event still resolves to the same couple of
+  invalidations today (the desktop's `GET /cases/:id` already embeds
+  visits/photos/treatments/activities, so *which* event fired doesn't
+  change *what* gets refetched — the taxonomy's value is in the emit-side
+  precision and the test suite that pins it, not in each client needing
+  bespoke per-event refetch logic yet).
+- Mobile deliberately does **not** listen for `CASE_CREATED` (a worker
+  has no visits on a just-created case yet, so it can't affect "my
+  visits today") — see the file's own comment. Desktop listens to
+  everything, since any of it can affect a manager's dashboard/lists.
 - `apps/desktop/src/realtime/useCaseRoom.ts` — joins `case:${id}` while
-  `CaseDetailPage` is mounted, leaves on unmount.
+  `CaseDetailPage` is mounted, leaves on unmount (4.3).
+- Both `lib/socket.ts` files: one shared `socket.io-client` connection,
+  connected on login, disconnected on logout — not per-screen.
 
-**Verified working end-to-end**, not just wired: the session's E2E test
-(17.14) has the desktop sitting on a case detail page, then simulates the
-brief's exact "worker completes inspection on mobile" scenario via a
-direct API call (playing the role of the mobile app, which isn't wired
-yet), and confirms the open desktop page updates its status badge,
-workflow stepper, and visit card — including the inspection text —
-**without a page reload or any user action**, within seconds, purely from
-the Socket.IO event. Screenshot evidence in the session transcript
-(`/tmp/e2e-06-realtime-updated.png` during the session — not committed,
-ephemeral verification artifact).
+### 4.7 Not done
 
-**Session 4 adds the mobile client**, same pattern as the desktop:
-`apps/mobile/lib/socket.ts` (one shared connection, connect on login/
-disconnect on logout) + `apps/mobile/realtime/RealtimeProvider.tsx`
-(listens for the same four events, invalidates the mobile app's own
-react-query keys — `visits.all()`/`visits.detail()`/`cases.detail()`).
-Deliberately **not** a per-user room: the server still broadcasts
-`CASES_ROOM` to every connection unfiltered (3.12, Socket.IO still isn't
-authenticated — see below), so the mobile client just invalidates and
-lets `GET /visits`'s own server-side `assignedWorkerId` scoping (see
-`visits.service.ts`) decide what a worker's refetch actually returns —
-the client never needs to filter events by "is this visit mine", the
-list endpoint it refetches already only ever contains the worker's own
-visits. This satisfies the brief's "when a manager assigns/reschedules a
-visit, the mobile app should eventually receive updates" — verified
-indirectly (not a dedicated realtime E2E test for mobile this session,
-unlike the desktop's dedicated one in session 3) by the fact the desktop
-and mobile share the exact same event set and cache-invalidation pattern
-already proven to work end-to-end.
-
-**Not done**: Socket.IO connections still aren't authenticated (unchanged
-from session 3 — noted in both `socket.ts` files' doc comments as a gap,
-not silently ignored). Low priority while payloads stay minimal
-(`{caseId}`/`{caseId, visitId}`).
+Socket.IO connections still aren't authenticated (unchanged since
+session 3 — noted in both `socket.ts` files' doc comments as a gap, not
+silently ignored). Low priority while every payload stays minimal (ids +
+one small field, no sensitive data) and every client's actual data
+access still goes through the authenticated, authorized REST API
+regardless of which events it happened to receive — but worth closing
+before this ships beyond internal use (see "Next steps").
 
 ## 5. File storage — real driver + real upload as of session 4
 
@@ -432,7 +573,7 @@ still-relevant condensed points:
 - Backend tests: `pnpm --filter @msph/server test` — 36 tests, still
   passing (re-ran this session after the socket fix).
 - Test DB is separate from dev DB (`msph_test` vs `msph_dev`) — see
-  section 20 "Commands reference" below for setup.
+  section 21 "Commands reference" below for setup.
 - No ESLint/Prettier anywhere in the repo yet (carried over, still not
   done — see Next steps).
 
@@ -1006,35 +1147,244 @@ exactly this, and where the line is.
   the dev server (resets the in-memory limiter) between heavy test
   iterations, not by weakening the limiter.
 
-## 19. Next steps (recommended order for the next session)
+## 19. Cross-client synchronization (session 5 — this session)
 
-1. **Storage driver hardening**: the desktop's "Ajouter une photo" form
+The task: focus specifically on synchronization between desktop, mobile,
+backend, and the database, with the backend/database as the single
+source of truth — design a meaningful event taxonomy (not one generic
+"everything changed" event), verify it with a realistic end-to-end
+scenario across both real clients, and fix any synchronization problems
+found. Event architecture and synchronization rules are documented in
+section 4 (kept as the living reference, not duplicated here) — this
+section is the session's build log, test results, and limitations.
+
+### 19.1 What was actually wrong before this session
+
+Not a rewrite of something broken end-to-end — sessions 3-4 already
+proved realtime worked (desktop updates live, mobile connects). But the
+event design itself was coarse and had one real bug:
+
+- Only 4 events existed (`CASE_CREATED/UPDATED`, `VISIT_CREATED/
+  UPDATED`) — a client couldn't tell "a visit was started" from "a visit
+  was rescheduled" from "an admin renamed a customer's problem
+  description" without refetching and diffing itself.
+- **A real bug, not hypothetical**: `POST /visits` (scheduling a new
+  visit) emitted `VISIT_UPDATED`, not `VISIT_CREATED` — because at the
+  time only those two visit events existed and "updated" was used as the
+  catch-all. Functionally harmless (both triggered the same
+  invalidation), but semantically wrong and exactly the kind of thing
+  that becomes a real bug the moment a client wants to react
+  specifically to "a new visit appeared" (e.g. a push notification, or
+  Scenario 2's "worker receives VISIT_ASSIGNED" requirement) rather than
+  refetch-and-diff. Fixed as part of the taxonomy work (see section 4.4's
+  table).
+- `POST /visits/:id/inspection` (standalone inspection recording) and
+  both photo endpoints emitted **nothing at all** — a worker recording an
+  inspection or adding a photo without also completing the visit in the
+  same call produced no realtime signal whatsoever. Also fixed.
+- Case-treatment actions (add/update/remove) all emitted the same
+  generic `CASE_UPDATED` — no way to tell "a treatment was added" from
+  "a treatment was marked performed" from "the case's priority changed".
+
+### 19.2 The refactor
+
+Covered in full in section 4 (the living reference) — summary: `case-
+status.ts`'s two status-mutating functions now return `{from, to} |
+null` instead of `void`; every cases/visits service function that calls
+them threads that result up to its own return value; every route handler
+picks the exact emit call(s) that describe what happened, using data the
+service already computed (never re-deriving "did anything change" at the
+route layer). `packages/shared`'s `SOCKET_EVENTS` grew from 6 to 16
+entries (including room housekeeping) with a typed `SocketEventPayloadMap`
+pinning every payload shape.
+
+### 19.3 Automated realtime test suite (new, committed)
+
+`apps/server/tests/realtime.test.ts` — the one test file in the suite
+that boots a **real** `http.Server` + `initSocket()` + a real
+`socket.io-client` connection (every other test file calls `createApp()`
+directly via supertest, no live socket — see `tests/helpers.ts`'s doc
+comment). Walks the brief's full manager+worker scenario end to end
+through the real HTTP routes and asserts the **exact** event name and
+payload fired at each step — not "some event fired", the precise
+`{event, payload}` pair, including negative assertions (e.g. starting an
+already-`SCHEDULED` case's first visit must **not** emit
+`CASE_STATUS_CHANGED`; completing a visit with no inspection fields must
+**not** emit `INSPECTION_CREATED`). Also covers a no-op case edit
+(confirms `CASE_UPDATED` fires, not `CASE_STATUS_CHANGED`) and
+`TREATMENT_REMOVED`. 4 tests, all passing, folded into the normal
+`pnpm --filter @msph/server test` run (40/40 total after this session,
+up from 36 — no existing test needed changes, the service-layer return
+type changes were additive).
+
+This is the repeatable, CI-friendly counterpart to the live cross-client
+verification below — it proves the *server* emits correctly, independent
+of any particular UI, and it'll catch a regression automatically on a
+future session even if nobody re-runs a full Playwright pass.
+
+### 19.4 Live cross-client verification (13 steps, both real UIs)
+
+A Playwright script drove **two live browser pages at once** — the real
+desktop app (Vite dev server) and the real mobile app (`expo start
+--web`) — both logged in and left open, with the manager and worker
+actions interleaved so each step could assert the *other* client updated
+**without any reload or manual refresh**:
+
+1. [Desktop] Create customer + case + schedule initial consultation
+   assigned to a worker.
+2. [Mobile, already sitting on Home, untouched since login] The new visit
+   appears — live.
+3. [Mobile] Open it, tap "Démarrer la visite". [Desktop, still on the
+   case detail page from step 1] Status flips to "En cours" — live.
+4. [Desktop] Choose a treatment **while the worker's visit is still in
+   progress**. [Mobile, still on the same Visit Detail screen, never
+   navigated away] The "Traitements du dossier" section appears with the
+   new treatment — live (this specifically proves `TREATMENT_ADDED`
+   reaching a screen deep in another client's navigation stack, not just
+   a list screen).
+5. [Mobile] Record observations (Inspection screen).
+6. [Mobile] Capture and really upload a photo (polled until the server
+   confirmed it — not an optimistic/fake success).
+7. [Mobile] Mark the treatment performed. [Desktop] Shows "Effectué" —
+   live (`TREATMENT_UPDATED`).
+8. [Mobile] Complete the visit. [Desktop] Shows the visit "Terminée" with
+   the worker's *exact* inspection text and the photo — live
+   (`VISIT_COMPLETED`, `INSPECTION_CREATED`).
+9. [Desktop] Schedule a follow-up visit, assigned to the same worker.
+10. [Mobile, still on Home] The follow-up (type "Suivi") appears — live
+    (`VISIT_CREATED`/`VISIT_ASSIGNED` reaching a screen the worker never
+    left or refreshed since step 2).
+11. [Mobile] Start and complete the follow-up (no inspection fields this
+    time — the negative case). [Desktop] Shows both visits, live.
+12. [Desktop] Mark the case resolved.
+13. [Mobile] Open a visit on the now-resolved case — shows a "Ce dossier
+    a été marqué résolu" banner, live (`CASE_RESOLVED` reaching mobile).
+
+**All 13 steps passed.** This directly satisfies the brief's Scenarios
+1-6 and its numbered test scenario (manager creates customer/case/
+consultation/assigns worker -> worker receives/starts/inspects/uploads
+photos/completes -> manager sees inspection/selects treatment/schedules
+follow-up -> worker receives/completes follow-up -> manager resolves),
+driven through the real UIs rather than simulated at the API layer (a
+step forward from session 3's E2E, which had to simulate the mobile side
+via raw API calls because the mobile app didn't exist yet).
+
+### 19.5 A real, small product gap this verification found and fixed
+
+Scenario 6 asks that "both applications display RESOLVED". Desktop
+already did (the case header badge). **Mobile did not** — it has no
+case-level status indicator anywhere (deliberate, per session 4: a
+visit-focused app, not a case-administration one). A worker opening a
+visit on a since-resolved case would see nothing telling them so. Fixed
+with a small, targeted addition: `apps/mobile/app/visit/[id]/index.tsx`
+now shows a banner ("Ce dossier a été marqué résolu" / "... a été
+annulé") when the case is in a terminal state — needs no new realtime
+wiring, it just reads `kase.status` from the same `cases.detail(caseId)`
+query the screen's other realtime-driven content already uses, so it
+updates live for free.
+
+### 19.6 Debugging notes: two false leads, for the next session's sanity
+
+Both looked like real synchronization bugs at first and were not —
+recorded here so a future session doesn't waste time re-diagnosing them:
+
+- **A React Navigation stack quirk on web, not a sync bug**: after
+  `router.replace("/")` (used throughout the mobile app to return to
+  Home), the screen(s) navigated away from can remain mounted-but-hidden
+  in the DOM rather than fully unmounting, and — because they're still
+  subscribed to the same react-query cache — they keep reactively
+  updating with new data exactly like the visible screen does. A
+  Playwright locator matching by text alone can therefore find multiple
+  elements, one hidden and stale-*looking* (though not actually stale
+  data-wise) and one real; the hidden one consistently mounts *earlier*
+  in DOM order. Every locator in the cross-client script that runs after
+  any mobile navigation uses `.last()` rather than the first match (or
+  Playwright's un-scoped `waitForSelector`, which silently proceeds with
+  the first match) for exactly this reason. Whether this also has any
+  real-device performance/memory implication (vs. iOS/Android's native
+  stack navigators, which typically unmount more aggressively) is
+  untested — flagged in "Next steps", not fixed, since it never produced
+  incorrect *data*, only a test-selector ambiguity.
+- **A test script bug that looked like a missing event**: the live
+  script's follow-up-visit step initially forgot to select a worker in
+  desktop's "Planifier une visite" modal (unlike the New Case page,
+  scheduling a follow-up does **not** inherit the previous visit's
+  worker — a deliberate explicit-choice-each-time design, not a bug).
+  The visit was created correctly (real `VISIT_CREATED`, no assigned
+  worker), so it correctly never reached the worker's mobile Home list —
+  which briefly looked like a missing `VISIT_ASSIGNED` delivery. It
+  wasn't; the visit genuinely had no assignee. Fixed the script, not the
+  app.
+
+### 19.7 Known limitations (honest, not papered over)
+
+- **Socket.IO still isn't authenticated** (4.7) — unchanged from
+  sessions 3-4, still low-priority while payloads carry only ids.
+- **Events fire on any accepted mutation call, not gated on an actual
+  diff** for a couple of edges: a `PATCH /cases/:id` that changes nothing
+  (e.g. re-submitting the same `priority`) still emits `CASE_UPDATED` —
+  pre-existing behavior from session 2, confirmed still true (and
+  explicitly tested — 19.3's "no-op case edit" test) rather than
+  silently assumed away. Harmless (an extra invalidation just triggers a
+  refetch that returns identical data) but worth knowing before treating
+  "an event fired" as proof "something changed".
+- **No dedicated E2E test for the realtime *client* side** (only the
+  server's emit contract has a committed automated test, 19.3) — the
+  13-step cross-client run (19.4) is real and thorough but, like
+  sessions 3-4's own E2E work, an ephemeral manual verification, not a
+  committed, CI-runnable test. A future session could port it to a
+  committed Playwright suite if the project acquires CI infrastructure
+  that can run two dev servers + a browser.
+- **The mounted-but-hidden navigated-away-screen behavior** (19.6) is
+  understood as a testing gotcha, not confirmed harmless or harmful on a
+  real device — worth a real-device pass to check.
+
+## 20. Next steps (recommended order for the next session)
+
+1. **Real device pass** — this session's cross-client verification
+   (19.4) and session 4's mobile verification were both necessarily
+   web-platform-only (no physical/emulated iOS/Android in this sandbox).
+   Highest-value remaining gap: confirm on a real device that camera
+   capture, `UploadTask`'s native upload transport (vs. the web `XHR`
+   fallback, 3.14), and realtime delivery over a real network all behave
+   the same as verified on web — and check whether the
+   mounted-but-hidden navigated-away-screen behavior noted in 19.6 has
+   any real memory/performance cost on native (React Navigation's native
+   stack typically unmounts more aggressively than its web fallback, so
+   this may simply not reproduce there — unconfirmed either way).
+2. **Socket.IO auth** — connections are still unauthenticated (noted in
+   both apps' `socket.ts` doc comments, and section 4.7). Not closed this
+   session either — still low priority while payloads stay minimal (ids
+   + one small field, no sensitive data, and every client's actual data
+   access is separately authenticated/authorized via REST regardless of
+   which events it received) — but worth closing before this ships
+   beyond internal use.
+3. **Storage driver hardening**: the desktop's "Ajouter une photo" form
    still uses the metadata-only `POST /visits/:id/photos` endpoint (a
-   manual storageKey reference) rather than the new real upload endpoint
+   manual storageKey reference) rather than the real upload endpoint
    (section 5) — give it a real file picker against `POST /visits/:id/
    photos/upload` instead, for parity with mobile.
-2. **Socket.IO auth** — connections are currently unauthenticated (noted
-   in both apps' `socket.ts` doc comments). Low priority while the
-   payloads stay minimal (`{caseId}`/`{caseId, visitId}`, no sensitive
-   data), but worth closing before this ships beyond internal use.
-3. **ESLint/Prettier** — carried over from sessions 1-3, still not done.
-4. **Electron packaging** (`electron-builder`) for distributable
+4. **Port the live cross-client verification (19.4) into a committed
+   test** if/when the project gets CI infrastructure that can run
+   multiple dev servers + a browser — today it's a real but ephemeral
+   manual run, unlike the server-side realtime contract (19.3), which
+   already is committed and runs with the normal test suite.
+5. **ESLint/Prettier** — carried over from sessions 1-4, still not done.
+6. **Electron packaging** (`electron-builder`) for distributable
    installers, and an Expo/EAS build for the mobile app's real iOS/
    Android binaries — nothing done here yet, dev-mode only for both.
-   This session's mobile verification (18.9) was necessarily
-   web-platform-only (no physical device/emulator in this sandbox) —
-   a real device pass (camera via `expo-image-picker`'s native path,
-   `UploadTask`'s native transport rather than the web XHR fallback,
-   push notification feasibility for realtime) is the highest-value
-   thing to do before this ships to actual field workers.
-5. Eventually: S3/R2 storage driver, email ingestion, an `OWNER` role
+7. Eventually: S3/R2 storage driver, email ingestion, an `OWNER` role
    tier if the business ever needs one (3.2), a real accessibility pass
    on desktop's `SearchSelect`/`Modal`/`Drawer` (currently
    mouse-driven), hoisting French labels into `packages/shared` now
    that both real clients need them (3.13), a background sync queue for
    mobile if offline usage patterns turn out to need more than the
-   current "don't lose the draft, retry visibly" approach (18.8).
-6. Smaller polish, not urgent: the desktop cases list's "last activity"
+   current "don't lose the draft, retry visibly" approach (18.8), and
+   per-event-type client refetch logic (today every event maps to the
+   same couple of invalidations per client — see 4.6 — fine at this
+   app's scale, revisit if a screen ever needs cheaper/more targeted
+   updates).
+8. Smaller polish, not urgent: the desktop cases list's "last activity"
    column could use a real per-case last-activity timestamp if a cheap
    backend query for it ever gets added (17.8); desktop list pages cap
    at 100 with no further pagination (fine at this company's scale);
@@ -1042,7 +1392,7 @@ exactly this, and where the line is.
    `react-native-web` (fine on real native — just not exercisable in a
    browser-based E2E, see 18.9's own scope note).
 
-## 20. Commands reference
+## 21. Commands reference
 
 ```bash
 # Install everything (run from repo root)
@@ -1087,7 +1437,7 @@ service postgresql start
 # worker@msph.local / ChangeMe123! (WORKER)
 ```
 
-## 21. Environment variables
+## 22. Environment variables
 
 See `.env.example` at repo root for the full documented server list —
 copy it to `apps/server/.env` and fill in real values. Never commit

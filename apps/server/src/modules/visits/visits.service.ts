@@ -18,7 +18,7 @@ import { paginationArgs, toPaginated } from "../../lib/pagination.js";
 import { ApiError } from "../../middleware/errorHandler.js";
 import type { AuthUser } from "../../middleware/auth.js";
 import { logCaseActivity } from "../cases/case-activity.js";
-import { recalculateCaseStatus } from "../cases/case-status.js";
+import { recalculateCaseStatus, type CaseStatusChange } from "../cases/case-status.js";
 import { storageDriver } from "../../storage/index.js";
 
 const visitInclude = {
@@ -67,9 +67,16 @@ export async function getVisit(id: string, requester: AuthUser): Promise<VisitDe
   return visit;
 }
 
+export interface ScheduleVisitResult {
+  visit: VisitDetail;
+  statusChange: CaseStatusChange | null;
+}
+
 /** ADMIN-only (route-enforced): "the company schedules the next
  * consultation/intervention date" and assigns a worker to it. */
-export async function scheduleVisit(input: ScheduleVisitInput, actorId: string): Promise<VisitDetail> {
+export async function scheduleVisit(input: ScheduleVisitInput, actorId: string): Promise<ScheduleVisitResult> {
+  let statusChange: CaseStatusChange | null = null;
+
   const visitId = await prisma.$transaction(async (tx) => {
     const kase = await assertExists(() => tx.case.findUnique({ where: { id: input.caseId } }), "caseId does not refer to an existing case");
     if (TERMINAL_CASE_STATUSES.includes(kase.status)) {
@@ -109,17 +116,30 @@ export async function scheduleVisit(input: ScheduleVisitInput, actorId: string):
       });
     }
 
-    await recalculateCaseStatus(tx, input.caseId, actorId);
+    statusChange = await recalculateCaseStatus(tx, input.caseId, actorId);
     return visit.id;
   });
 
-  return getVisitDetail(visitId);
+  return { visit: await getVisitDetail(visitId), statusChange };
+}
+
+export interface UpdateVisitResult {
+  visit: VisitDetail;
+  statusChange: CaseStatusChange | null;
+  /** True when this call actually changed `assignedWorkerId` (including
+   * to/from null) — lets the route emit VISIT_ASSIGNED specifically
+   * instead of the generic VISIT_UPDATED for a reassignment. */
+  workerAssignmentChanged: boolean;
+  assignedWorkerId: string | null;
 }
 
 /** ADMIN-only (route-enforced): reschedule, reassign, edit notes, or
  * cancel/mark-no-show a visit. A worker never reaches this route —
  * they act through start/complete below. */
-export async function updateVisit(id: string, input: UpdateVisitInput, actorId: string): Promise<VisitDetail> {
+export async function updateVisit(id: string, input: UpdateVisitInput, actorId: string): Promise<UpdateVisitResult> {
+  let statusChange: CaseStatusChange | null = null;
+  let workerAssignmentChanged = false;
+
   await prisma.$transaction(async (tx) => {
     const visit = await tx.visit.findUnique({ where: { id } });
     if (!visit) throw ApiError.notFound("Visit");
@@ -153,6 +173,7 @@ export async function updateVisit(id: string, input: UpdateVisitInput, actorId: 
       });
     }
     if (input.assignedWorkerId !== undefined && input.assignedWorkerId !== visit.assignedWorkerId) {
+      workerAssignmentChanged = true;
       await logCaseActivity(tx, {
         caseId: visit.caseId,
         type: "WORKER_ASSIGNED",
@@ -165,14 +186,26 @@ export async function updateVisit(id: string, input: UpdateVisitInput, actorId: 
       await logCaseActivity(tx, { caseId: visit.caseId, type: "VISIT_CANCELLED", message: "Visit cancelled", actorId, metadata: { visitId: id } });
     }
 
-    await recalculateCaseStatus(tx, visit.caseId, actorId);
+    statusChange = await recalculateCaseStatus(tx, visit.caseId, actorId);
   });
 
-  return getVisitDetail(id);
+  return {
+    visit: await getVisitDetail(id),
+    statusChange,
+    workerAssignmentChanged,
+    assignedWorkerId: input.assignedWorkerId ?? null,
+  };
+}
+
+export interface StartVisitResult {
+  visit: VisitDetail;
+  statusChange: CaseStatusChange | null;
 }
 
 /** Worker taps "Start visit" (or admin does it on their behalf). */
-export async function startVisit(id: string, input: StartVisitInput, requester: AuthUser): Promise<VisitDetail> {
+export async function startVisit(id: string, input: StartVisitInput, requester: AuthUser): Promise<StartVisitResult> {
+  let statusChange: CaseStatusChange | null = null;
+
   await prisma.$transaction(async (tx) => {
     const visit = await tx.visit.findUnique({ where: { id } });
     if (!visit) throw ApiError.notFound("Visit");
@@ -184,15 +217,26 @@ export async function startVisit(id: string, input: StartVisitInput, requester: 
     const startedAt = input.startedAt ? new Date(input.startedAt) : new Date();
     await tx.visit.update({ where: { id }, data: { status: "IN_PROGRESS", startedAt } });
     await logCaseActivity(tx, { caseId: visit.caseId, type: "VISIT_STARTED", message: "Visit started", actorId: requester.id, metadata: { visitId: id } });
-    await recalculateCaseStatus(tx, visit.caseId, requester.id);
+    statusChange = await recalculateCaseStatus(tx, visit.caseId, requester.id);
   });
 
-  return getVisitDetail(id);
+  return { visit: await getVisitDetail(id), statusChange };
+}
+
+export interface CompleteVisitResult {
+  visit: VisitDetail;
+  statusChange: CaseStatusChange | null;
+  /** True when observations/remarks/condition were included in this
+   * call — the route also emits INSPECTION_CREATED when this is set. */
+  inspectionRecorded: boolean;
 }
 
 /** Worker taps "Complete visit" — also records the inspection fields in
  * the same step when provided (see CompleteVisitInput's doc comment). */
-export async function completeVisit(id: string, input: CompleteVisitInput, requester: AuthUser): Promise<VisitDetail> {
+export async function completeVisit(id: string, input: CompleteVisitInput, requester: AuthUser): Promise<CompleteVisitResult> {
+  let statusChange: CaseStatusChange | null = null;
+  let inspectionRecorded = false;
+
   await prisma.$transaction(async (tx) => {
     const visit = await tx.visit.findUnique({ where: { id } });
     if (!visit) throw ApiError.notFound("Visit");
@@ -214,6 +258,7 @@ export async function completeVisit(id: string, input: CompleteVisitInput, reque
 
     const hasInspectionData = input.observations !== undefined || input.remarks !== undefined || input.condition !== undefined;
     if (hasInspectionData) {
+      inspectionRecorded = true;
       await tx.inspection.upsert({
         where: { visitId: id },
         create: { visitId: id, observations: input.observations, remarks: input.remarks, condition: input.condition },
@@ -228,15 +273,17 @@ export async function completeVisit(id: string, input: CompleteVisitInput, reque
       });
     }
 
-    await recalculateCaseStatus(tx, visit.caseId, requester.id);
+    statusChange = await recalculateCaseStatus(tx, visit.caseId, requester.id);
   });
 
-  return getVisitDetail(id);
+  return { visit: await getVisitDetail(id), statusChange, inspectionRecorded };
 }
 
 /** POST /visits/:id/inspection — records/updates the inspection
  * independently of completing the visit (e.g. an admin correcting it
- * after the fact, or a worker filling it in before tapping complete). */
+ * after the fact, or a worker filling it in before tapping complete).
+ * Returns `caseId` alongside the inspection since the route only has the
+ * visit id from the URL and needs the case id to emit INSPECTION_CREATED. */
 export async function recordInspection(id: string, input: RecordInspectionInput, requester: AuthUser) {
   return prisma.$transaction(async (tx) => {
     const visit = await tx.visit.findUnique({ where: { id } });
@@ -257,7 +304,7 @@ export async function recordInspection(id: string, input: RecordInspectionInput,
       metadata: { visitId: id },
     });
 
-    return inspection;
+    return { inspection, caseId: visit.caseId };
   });
 }
 

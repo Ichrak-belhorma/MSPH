@@ -4,6 +4,19 @@ import { logCaseActivity } from "./case-activity.js";
 
 type Tx = Prisma.TransactionClient | PrismaClient;
 
+/** Returned by both status-mutating functions below so the calling route
+ * handler — which runs *after* the transaction commits — can emit
+ * `CASE_STATUS_CHANGED` (and `CASE_RESOLVED`) with the real before/after
+ * values. `null` means the status didn't actually change (e.g. an admin
+ * PATCHed `status: "SCHEDULED"` on a case already SCHEDULED) — no event
+ * should fire for a no-op. Emitting from inside the transaction itself
+ * would risk telling clients about a change that then rolls back; see
+ * CONTEXT.md "Event architecture" for the full reasoning. */
+export interface CaseStatusChange {
+  from: CaseStatus;
+  to: CaseStatus;
+}
+
 /**
  * Case status state machine.
  *
@@ -29,9 +42,9 @@ type Tx = Prisma.TransactionClient | PrismaClient;
  * PATCH /cases/:id can move it out again (reopening a case), which is a
  * deliberate human decision, never inferred from visit data.
  */
-export async function recalculateCaseStatus(tx: Tx, caseId: string, actorId?: string | null): Promise<void> {
+export async function recalculateCaseStatus(tx: Tx, caseId: string, actorId?: string | null): Promise<CaseStatusChange | null> {
   const kase = await tx.case.findUnique({ where: { id: caseId } });
-  if (!kase || TERMINAL_CASE_STATUSES.includes(kase.status)) return;
+  if (!kase || TERMINAL_CASE_STATUSES.includes(kase.status)) return null;
 
   const visits = await tx.visit.findMany({ where: { caseId }, select: { status: true } });
   const hasCompleted = visits.some((v) => v.status === "COMPLETED");
@@ -39,7 +52,7 @@ export async function recalculateCaseStatus(tx: Tx, caseId: string, actorId?: st
 
   const next: CaseStatus = hasCompleted ? CaseStatus.IN_PROGRESS : hasActive ? CaseStatus.SCHEDULED : CaseStatus.NEW;
 
-  if (next === kase.status) return;
+  if (next === kase.status) return null;
 
   await tx.case.update({ where: { id: caseId }, data: { status: next } });
   await logCaseActivity(tx, {
@@ -49,6 +62,8 @@ export async function recalculateCaseStatus(tx: Tx, caseId: string, actorId?: st
     actorId: actorId ?? null,
     metadata: { from: kase.status, to: next, reason: "auto" },
   });
+
+  return { from: kase.status, to: next };
 }
 
 /** Explicit admin action: resolve or cancel a case (or reopen one). Sets
@@ -58,9 +73,9 @@ export async function applyExplicitStatus(
   caseId: string,
   status: CaseStatus,
   actorId: string,
-): Promise<void> {
+): Promise<CaseStatusChange | null> {
   const kase = await tx.case.findUnique({ where: { id: caseId } });
-  if (!kase || kase.status === status) return;
+  if (!kase || kase.status === status) return null;
 
   await tx.case.update({
     where: { id: caseId },
@@ -74,4 +89,6 @@ export async function applyExplicitStatus(
     actorId,
     metadata: { from: kase.status, to: status, reason: "manual" },
   });
+
+  return { from: kase.status, to: status };
 }

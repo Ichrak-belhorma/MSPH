@@ -7,7 +7,7 @@ import { assertCaseAccess } from "../../lib/authz.js";
 import { ApiError } from "../../middleware/errorHandler.js";
 import type { AuthUser } from "../../middleware/auth.js";
 import { logCaseActivity } from "./case-activity.js";
-import { applyExplicitStatus, recalculateCaseStatus } from "./case-status.js";
+import { applyExplicitStatus, recalculateCaseStatus, type CaseStatusChange } from "./case-status.js";
 
 /** Full detail shape for GET /cases/:id — matches
  * packages/shared/src/types/entities.ts `CaseWithRelations`. */
@@ -35,7 +35,23 @@ const caseListInclude = {
 
 export type CaseListItem = Prisma.CaseGetPayload<{ include: typeof caseListInclude }>;
 
-export async function createCase(input: CreateCaseInput, actorId: string): Promise<CaseDetail> {
+/** Everything a route handler needs to emit the right realtime events
+ * after the transaction commits — see case-status.ts's CaseStatusChange
+ * doc comment for why this is returned rather than emitted from inside
+ * the transaction. */
+export interface CreateCaseResult {
+  case: CaseDetail;
+  /** Set when `initialVisitScheduledAt` was provided — a visit was
+   * created in the same request. */
+  createdVisitId: string | null;
+  assignedWorkerId: string | null;
+  statusChange: CaseStatusChange | null;
+}
+
+export async function createCase(input: CreateCaseInput, actorId: string): Promise<CreateCaseResult> {
+  let createdVisitId: string | null = null;
+  let statusChange: CaseStatusChange | null = null;
+
   const caseId = await prisma.$transaction(async (tx) => {
     let customerId = input.customerId;
     if (customerId) {
@@ -90,6 +106,7 @@ export async function createCase(input: CreateCaseInput, actorId: string): Promi
           assignedWorkerId: input.assignedWorkerId,
         },
       });
+      createdVisitId = visit.id;
       await logCaseActivity(tx, {
         caseId: kase.id,
         type: "VISIT_SCHEDULED",
@@ -106,13 +123,14 @@ export async function createCase(input: CreateCaseInput, actorId: string): Promi
           metadata: { visitId: visit.id, workerId: input.assignedWorkerId },
         });
       }
-      await recalculateCaseStatus(tx, kase.id, actorId);
+      statusChange = await recalculateCaseStatus(tx, kase.id, actorId);
     }
 
     return kase.id;
   });
 
-  return prisma.case.findUniqueOrThrow({ where: { id: caseId }, include: caseInclude });
+  const kase = await prisma.case.findUniqueOrThrow({ where: { id: caseId }, include: caseInclude });
+  return { case: kase, createdVisitId, assignedWorkerId: input.assignedWorkerId ?? null, statusChange };
 }
 
 export async function listCases(query: CaseListQuery, requester: AuthUser): Promise<Paginated<CaseListItem>> {
@@ -157,15 +175,22 @@ export async function getCaseTimeline(id: string, requester: AuthUser) {
   return prisma.caseActivity.findMany({ where: { caseId: id }, orderBy: { createdAt: "asc" } });
 }
 
+export interface UpdateCaseResult {
+  case: CaseDetail;
+  statusChange: CaseStatusChange | null;
+}
+
 /** ADMIN-only (enforced at the route) — direct edits to the case record
  * plus the two explicit lifecycle actions (resolve/cancel/reopen). */
-export async function updateCase(id: string, input: UpdateCaseInput, actorId: string): Promise<CaseDetail> {
+export async function updateCase(id: string, input: UpdateCaseInput, actorId: string): Promise<UpdateCaseResult> {
+  let statusChange: CaseStatusChange | null = null;
+
   await prisma.$transaction(async (tx) => {
     const kase = await tx.case.findUnique({ where: { id } });
     if (!kase) throw ApiError.notFound("Case");
 
     if (input.status && input.status !== kase.status) {
-      await applyExplicitStatus(tx, id, input.status, actorId);
+      statusChange = await applyExplicitStatus(tx, id, input.status, actorId);
     }
 
     if (input.problemDescription !== undefined || input.priority !== undefined) {
@@ -176,5 +201,6 @@ export async function updateCase(id: string, input: UpdateCaseInput, actorId: st
     }
   });
 
-  return prisma.case.findUniqueOrThrow({ where: { id }, include: caseInclude });
+  const kase = await prisma.case.findUniqueOrThrow({ where: { id }, include: caseInclude });
+  return { case: kase, statusChange };
 }
