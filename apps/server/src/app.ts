@@ -35,7 +35,15 @@ export function createApp(): Express {
 
   // Static serving for locally-stored photo uploads (dev only — see
   // src/storage; production will point STORAGE_PUBLIC_URL at S3/R2 instead).
-  app.use("/uploads", express.static(env.STORAGE_LOCAL_ROOT));
+  // helmet()'s default Cross-Origin-Resource-Policy is "same-origin",
+  // which silently blocks a browser-based client on a different origin
+  // (the desktop's Vite dev server, mobile running on Expo web) from
+  // loading these images at all — found via the mobile E2E test's photo
+  // thumbnails failing with ERR_BLOCKED_BY_RESPONSE.NotSameOrigin. These
+  // are uploaded case photos meant to be viewed by any authenticated
+  // client, not same-origin-only assets, so relax it for this mount only
+  // (the rest of the app keeps helmet's stricter JSON-API defaults).
+  app.use("/uploads", helmet.crossOriginResourcePolicy({ policy: "cross-origin" }), express.static(env.STORAGE_LOCAL_ROOT));
 
   app.use("/api", apiRouter);
 

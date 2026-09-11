@@ -19,6 +19,7 @@ import { ApiError } from "../../middleware/errorHandler.js";
 import type { AuthUser } from "../../middleware/auth.js";
 import { logCaseActivity } from "../cases/case-activity.js";
 import { recalculateCaseStatus } from "../cases/case-status.js";
+import { storageDriver } from "../../storage/index.js";
 
 const visitInclude = {
   case: { include: { customer: true, property: true } },
@@ -274,6 +275,54 @@ export async function addPhotoToVisit(id: string, input: AddVisitPhotoInput, req
         visitId: id,
         storageKey: input.storageKey,
         url: input.url,
+        caption: input.caption,
+        uploadedBy: requester.id,
+      },
+    });
+
+    await logCaseActivity(tx, {
+      caseId: visit.caseId,
+      type: "PHOTO_ADDED",
+      message: "Photo added",
+      actorId: requester.id,
+      metadata: { visitId: id, photoId: photo.id },
+    });
+
+    return photo;
+  });
+}
+
+/**
+ * POST /visits/:id/photos/upload — real binary upload (session 4). The
+ * file is written to `storageDriver` *before* the transaction opens: if
+ * the write fails, nothing touches the database at all (no orphaned
+ * Photo row pointing at a file that was never saved — see the route's
+ * doc comment). Authorization is checked up front too, before spending
+ * the cost of writing the file, so a worker can't use this endpoint to
+ * probe/fill storage for a visit they don't have access to.
+ */
+export async function uploadPhotoToVisit(
+  id: string,
+  input: { buffer: Buffer; originalName: string; mimeType: string; caption?: string },
+  requester: AuthUser,
+) {
+  const visit = await prisma.visit.findUnique({ where: { id } });
+  if (!visit) throw ApiError.notFound("Visit");
+  assertVisitAccess(visit.assignedWorkerId, requester);
+
+  const stored = await storageDriver.save({
+    buffer: input.buffer,
+    originalName: input.originalName,
+    mimeType: input.mimeType,
+  });
+
+  return prisma.$transaction(async (tx) => {
+    const photo = await tx.photo.create({
+      data: {
+        caseId: visit.caseId,
+        visitId: id,
+        storageKey: stored.storageKey,
+        url: stored.url,
         caption: input.caption,
         uploadedBy: requester.id,
       },

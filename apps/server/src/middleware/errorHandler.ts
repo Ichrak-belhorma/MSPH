@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { MulterError } from "multer";
 import { ZodError } from "zod";
 import type { ApiErrorBody } from "@msph/shared";
 import { logger } from "../lib/logger.js";
@@ -62,6 +63,20 @@ export function errorHandler(err: unknown, req: Request, res: Response, next: Ne
   if (err instanceof ApiError) {
     const body: ApiErrorBody = { error: { message: err.message, code: err.code } };
     res.status(err.status).json(body);
+    return;
+  }
+
+  // Photo upload failures (file too large, wrong field name, ...) — a
+  // client mistake, not a server fault, so 400 rather than falling
+  // through to the generic 500 below.
+  if (err instanceof MulterError) {
+    const body: ApiErrorBody = { error: { message: err.message, code: "UPLOAD_ERROR" } };
+    res.status(400).json(body);
+    return;
+  }
+  if (err instanceof Error && err.message === "Only image uploads are allowed") {
+    const body: ApiErrorBody = { error: { message: err.message, code: "UPLOAD_ERROR" } };
+    res.status(400).json(body);
     return;
   }
 

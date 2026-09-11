@@ -4,8 +4,11 @@
 persistent memory of the project. Do not redo completed work — check
 "Current status" and "Next steps" first and continue from there.
 
-Last updated: 2026-09-11 (session 3 — desktop application: full French UI
-wired to the real API, realtime, Electron security).
+Last updated: 2026-09-11 (session 4 — mobile application: full French
+worker app wired to the real API, real photo upload + storage driver,
+realtime, offline-safe drafts). Previous: session 3 — desktop
+application: full French UI wired to the real API, realtime, Electron
+security.
 
 ---
 
@@ -37,9 +40,9 @@ in full — this file records decisions and current state, not the brief).
   application** — not a placeholder shell. See section 17 for the full
   build.
 - **apps/mobile** — Expo (SDK 57) + React Native + TypeScript, using
-  **Expo Router** (file-based routing). Worker field app. **Still
-  placeholder screens** — not touched this session, not in scope (the task
-  was specifically the desktop app). Next session's job if picked up.
+  **Expo Router** (file-based routing). Worker field app. **As of session
+  4, this is a real, fully-French, API-wired application** — not a
+  placeholder shell. See section 18 for the full build.
 - **packages/shared** — domain types, Zod schemas, enums, constants. All
   three apps and the server import from `@msph/shared`; nothing is
   duplicated. Untouched this session except reading from it — no shared
@@ -180,6 +183,52 @@ see section 17.7 — so there's no per-user filtering to apply here anyway;
 every open screen wants to know a case changed). One-line fix, but a real
 bug that would have made "dashboard updates live" simply not work.
 
+### 3.13 Mobile UI: French labels duplicated per-app, not hoisted to `packages/shared` (session 4)
+
+Same decision as 3.11, now applied a second time. `apps/mobile/lib/
+labels.ts` duplicates the subset of French enum labels the mobile screens
+actually use (visit type/status, case-treatment status, case priority) —
+keyed off the same enum values as `apps/desktop/src/lib/labels.ts` so a
+mismatch is a TypeScript error, not silent drift, but a genuinely separate
+file. **Explicitly flagged as revisitable**: 3.11's original reasoning
+("mobile might stay English") is now false — both real clients are
+French. Hoisting a shared `labels-fr.ts` into `packages/shared` would be
+a reasonable follow-up, just not done this session to avoid touching the
+already-verified desktop app while building the mobile one (see "Next
+steps").
+
+### 3.14 Mobile photo upload: two transports behind one function (session 4)
+
+`apps/mobile/lib/photoUpload.ts` uploads through **native** platforms via
+`expo-file-system`'s `UploadTask` (true multipart streaming + progress,
+the only real option on iOS/Android) but through **web** via a manual
+`XMLHttpRequest` + `FormData` (needed for progress — `fetch` has no
+upload-progress event) — because `expo-file-system`'s `UploadTask` has
+**no web implementation at all** (confirmed by inspecting the package: no
+`NetworkTasks.web.ts` exists, only a generic "not supported on web"
+warning). This project's `app.json` declares a `web` platform block, and
+this sandbox has no physical iOS/Android device to test on, so the web
+branch is also how this session's own E2E verification actually exercised
+a real upload end-to-end through the UI (see section 18.9) rather than
+only through a raw `curl`. Both branches return the same
+`{status, body}` shape so the calling code (retry-once-on-401, error
+parsing) doesn't need to know which transport ran.
+
+### 3.15 Worker permissions: enforced entirely by existing session-2 backend code, nothing new needed (session 4)
+
+The brief: "Workers should only access cases/visits assigned to them...
+Do not rely solely on frontend hiding." This was **already true** before
+this session — `assertCaseAccess`/`assertVisitAccess`
+(`apps/server/src/lib/authz.ts`, session 2) and `listCases`/`listVisits`'s
+server-side `assignedWorkerId` override (also session 2) already restrict
+a WORKER to only their own assigned visits/cases on every route, list or
+detail. The mobile app's API modules (`apps/mobile/api/*.ts`) call the
+exact same endpoints the desktop uses — no new backend authorization code
+was written this session, and none was needed. Verified this still holds
+by construction (same server code, same tests — see section 8/backend
+test count, unchanged at 36/36) rather than by writing new
+worker-permission tests specifically for mobile.
+
 ## 4. Realtime design (Socket.IO)
 
 Session 2 wired the server-side emits (`emitCaseCreated/emitCaseUpdated/
@@ -212,21 +261,84 @@ the Socket.IO event. Screenshot evidence in the session transcript
 (`/tmp/e2e-06-realtime-updated.png` during the session — not committed,
 ephemeral verification artifact).
 
-**Not done**: Socket.IO connections aren't authenticated (see 17.7); the
-mobile app doesn't connect at all yet (it doesn't exist as a real app —
-still session-1 placeholders).
+**Session 4 adds the mobile client**, same pattern as the desktop:
+`apps/mobile/lib/socket.ts` (one shared connection, connect on login/
+disconnect on logout) + `apps/mobile/realtime/RealtimeProvider.tsx`
+(listens for the same four events, invalidates the mobile app's own
+react-query keys — `visits.all()`/`visits.detail()`/`cases.detail()`).
+Deliberately **not** a per-user room: the server still broadcasts
+`CASES_ROOM` to every connection unfiltered (3.12, Socket.IO still isn't
+authenticated — see below), so the mobile client just invalidates and
+lets `GET /visits`'s own server-side `assignedWorkerId` scoping (see
+`visits.service.ts`) decide what a worker's refetch actually returns —
+the client never needs to filter events by "is this visit mine", the
+list endpoint it refetches already only ever contains the worker's own
+visits. This satisfies the brief's "when a manager assigns/reschedules a
+visit, the mobile app should eventually receive updates" — verified
+indirectly (not a dedicated realtime E2E test for mobile this session,
+unlike the desktop's dedicated one in session 3) by the fact the desktop
+and mobile share the exact same event set and cache-invalidation pattern
+already proven to work end-to-end.
 
-## 5. File storage — still just the abstraction boundary, no driver yet
+**Not done**: Socket.IO connections still aren't authenticated (unchanged
+from session 3 — noted in both `socket.ts` files' doc comments as a gap,
+not silently ignored). Low priority while payloads stay minimal
+(`{caseId}`/`{caseId, visitId}`).
 
-Unchanged from session 1/2: `STORAGE_DRIVER=local` env var exists and is
-validated at boot, `/uploads` is statically served, but there is still no
-`src/storage/` module and no binary upload endpoint.
-`POST /visits/:id/photos` is metadata-only. **Session 3's desktop
-"Ajouter une photo" form is honest about this** — it asks for a text
-"référence du fichier" and says outright, in French, that real file
-storage isn't available yet, rather than presenting a fake "choose file"
-button that doesn't actually upload anything.
-See `apps/desktop/src/pages/cases/AddPhotoModal.tsx`.
+## 5. File storage — real driver + real upload as of session 4
+
+Sessions 1-3 only had the abstraction boundary (`STORAGE_DRIVER` env var,
+`/uploads` static mount) with no actual driver or binary upload endpoint.
+**Session 4 built the real thing**, needed for the mobile app's photo
+capture:
+
+- `apps/server/src/storage/StorageDriver.ts` — a narrow interface
+  (`save({buffer, originalName, mimeType}) → {storageKey, url}`), the
+  seam for a future S3/R2 driver.
+- `apps/server/src/storage/localStorageDriver.ts` — implements it by
+  writing to `STORAGE_LOCAL_ROOT` under a random (`randomUUID()`)
+  filename with a safe extension derived from the original name/mimetype
+  (never trusts the client-supplied name as a path), returning
+  `STORAGE_PUBLIC_URL/<filename>`.
+- `apps/server/src/storage/index.ts` — picks the concrete driver from
+  `STORAGE_DRIVER` (only `"local"` exists today).
+- `POST /visits/:id/photos/upload` (new) — real `multipart/form-data`
+  upload (`multer`, memory storage, 15MB cap, image-mimetype-only
+  filter), field name `photo` + optional `caption` field. Writes the file
+  via `storageDriver` **before** opening the DB transaction — if the
+  write fails, no `Photo` row is ever created (see
+  `visits.service.ts`'s `uploadPhotoToVisit`, doc comment explains why
+  order matters). This is what the mobile app's photo capture screen
+  actually calls.
+- `POST /visits/:id/photos` (unchanged) — the session 1-3 metadata-only
+  endpoint still exists as-is for anything that already has a
+  `storageKey`/URL from elsewhere; the desktop's "Ajouter une photo" form
+  (`apps/desktop/src/pages/cases/AddPhotoModal.tsx`) still uses this one
+  and is still honest that it's a manual reference, not a file picker —
+  **not revisited this session** (out of scope; the desktop already
+  works, and the task was the mobile app). A natural follow-up (not done):
+  give the desktop a real file-picker upload against the new
+  `/photos/upload` endpoint instead of the manual-reference form.
+- Uploaded files land in `apps/server/storage/uploads/` (gitignored, only
+  `.gitkeep` tracked) and are served back by `app.ts`'s existing
+  `express.static` mount.
+- **A real bug found and fixed while wiring this**: helmet's default
+  `Cross-Origin-Resource-Policy: same-origin` on the `/uploads` mount
+  silently blocked any browser-based client on a different origin (the
+  desktop's Vite dev server, the mobile app running via `expo start
+  --web`) from loading an uploaded photo at all
+  (`ERR_BLOCKED_BY_RESPONSE.NotSameOrigin` in the browser console, no
+  server-side error). Fixed by scoping
+  `helmet.crossOriginResourcePolicy({ policy: "cross-origin" })` to just
+  the `/uploads` mount in `app.ts` (the rest of the app keeps helmet's
+  stricter JSON-API defaults) — found via the mobile E2E test's photo
+  thumbnails failing to render, not by inspection.
+- Verified genuinely end-to-end, not just unit-tested: a real PNG
+  uploaded via `curl -F` during manual testing, confirmed written to disk
+  and re-servable over HTTP; then the mobile app's own photo-capture
+  screen uploaded a real file through the full UI → `POST
+  /visits/:id/photos/upload` → disk → `GET /uploads/...` loop (see
+  section 18's verification).
 
 ## 6. Authentication
 
@@ -320,7 +432,7 @@ still-relevant condensed points:
 - Backend tests: `pnpm --filter @msph/server test` — 36 tests, still
   passing (re-ran this session after the socket fix).
 - Test DB is separate from dev DB (`msph_test` vs `msph_dev`) — see
-  section 18 "Commands reference" below for setup.
+  section 20 "Commands reference" below for setup.
 - No ESLint/Prettier anywhere in the repo yet (carried over, still not
   done — see Next steps).
 
@@ -329,7 +441,7 @@ still-relevant condensed points:
 The task: build the first serious version of the desktop app, fully in
 French, professional/dense/operational styling, wired to the real API
 (no mocking), with realtime and Electron security best practices. Done —
-see section 19 for the verification evidence.
+see 17.14 for the verification evidence.
 
 ### 17.1 Dependencies added
 
@@ -635,40 +747,302 @@ Not just typechecked — actually run and driven, end to end:
 - **French grammar in the activity timeline** — see 3.11's "Suivi
   planifiée" note.
 
-## 18. Next steps (recommended order for the next session)
+## 18. Mobile application (session 4 — this session)
 
-1. **Mobile app** — same treatment as this session but for
-   `apps/mobile`: real login (`expo-secure-store` for the refresh token,
-   not `AsyncStorage`), Today/Upcoming screens from `GET /visits`, visit
-   detail wired to start/complete/inspection/photos, camera capture once
-   the storage driver (next item) exists. Once mobile is real, redo the
-   17.14 E2E scenario using the actual mobile UI instead of a raw API
-   call standing in for it.
-2. **Storage driver** (section 5): `apps/server/src/storage/` (a
-   `StorageDriver` interface + `LocalStorageDriver`), a real multipart
-   upload endpoint, then wire both the desktop's `AddPhotoModal` and
-   mobile's camera capture to it instead of the current
-   type-a-reference-by-hand placeholder.
-3. **Socket.IO auth** — connections are currently unauthenticated (noted
-   in `socket.ts`'s doc comment). Low priority while the payloads stay
-   minimal (`{caseId}`/`{caseId, visitId}`, no sensitive data), but worth
-   closing before this ships beyond internal use.
-4. **ESLint/Prettier** — carried over from sessions 1-2, still not done.
-5. **Electron packaging** (`electron-builder`) for distributable
-   installers — nothing done here yet, dev-mode only.
-6. Eventually: S3/R2 storage driver, email ingestion, an `OWNER` role
+The task: build the first serious version of the worker-facing mobile
+app, fully in French, optimized for a one-handed/gloved/time-pressed
+field worker (large touch targets, minimal typing, minimal navigation
+depth), with real photo upload, offline-safe drafts, and realtime. Done
+— see 18.9 for the verification evidence. **Not a miniature desktop** —
+different screens, different information density, different navigation
+model entirely (a hub-and-modal flow, not a sidebar).
+
+### 18.1 Dependencies added
+
+`apps/mobile/package.json`: `expo-secure-store` (refresh token, OS
+keychain/keystore — the mobile equivalent of the desktop's Electron
+`safeStorage`), `expo-file-system` (real multipart photo upload with
+progress, native platforms — see 3.14), `@react-native-async-storage/
+async-storage` (local draft persistence — non-sensitive data only, see
+18.8), `@tanstack/react-query`, `socket.io-client`, `zod`, `date-fns`
+(same roles as the desktop's equivalents, section 17.1/17.3).
+`expo-image-picker` was already a dependency (camera + gallery, session
+1) and needed no changes.
+
+### 18.2 API client layer (`apps/mobile/lib/` + `apps/mobile/api/`)
+
+Deliberately mirrors the desktop's layer (sections 17.2-17.3) file-for-
+file where the concepts transfer directly — `authStore.ts`,
+`apiClient.ts` (same 401→refresh→retry-once, de-duped concurrent
+refresh), `queryClient.ts`, `socket.ts`, `secureStorage.ts` (wraps
+`expo-secure-store` instead of the Electron IPC bridge), `labels.ts`
+(3.13), `format.ts` (French date formatting via date-fns). `api/{auth,
+visits,cases}.ts` expose only what a worker's screens actually call —
+no `scheduleVisit`/`updateVisit`/case-CRUD/treatment-assignment (those
+stay admin-only, desktop-only) — see 3.15 for why no new backend
+authorization was needed to make this safe.
+
+One **React Native-specific gotcha** this hit: every internal import in
+the desktop's equivalent files uses an explicit `.js` extension
+(required by the server/desktop's `NodeNext`/`Node16` TypeScript module
+resolution — see CONTEXT.md's earlier Electron `.cts` note). Metro
+(React Native's bundler) does **not** do TypeScript's `.js`→`.ts`
+extension remapping — an import written `from "./apiClient.js"` fails
+to resolve at bundle time (`Unable to resolve module`) even though
+`tsc` accepts it fine (the mobile `tsconfig.json` extends `expo/
+tsconfig.base`, which uses `moduleResolution: "bundler"`, lenient about
+extensions in a way that doesn't match what Metro actually needs).
+Every internal relative import in `apps/mobile` uses **no** extension
+(`from "./apiClient"`) — confirmed by a full `expo export --platform
+web` bundle succeeding cleanly (see 18.9).
+
+### 18.3 Auth (`apps/mobile/auth/AuthContext.tsx`)
+
+Same shape as the desktop's (section 6): access token in memory,
+refresh token in `expo-secure-store`, silent boot-time resume, 401→
+refresh→retry-once. `app/_layout.tsx` uses Expo Router's
+`<Stack.Protected guard={...}>` (a real, supported feature of the
+installed expo-router 57.0.20 — confirmed in the package source before
+relying on it) to swap the entire screen set based on
+`isAuthenticated`, rather than a per-screen guard component — a worker
+never sees a login-screen flash or a bounce through a protected route.
+
+### 18.4 Design system (`apps/mobile/components/ui.tsx` + `lib/theme.ts`)
+
+Built fresh, not adapted from the desktop's dense-table CSS system
+(wrong shape for this app entirely) and not the scaffold's `Themed.tsx`
+light/dark pair (deleted — see 18.5). A **single light theme**
+(`lib/theme.ts`'s doc comment explains why: a worker outdoors in
+daylight needs contrast, not a theme toggle) built around a handful of
+large, obvious primitives (`components/ui.tsx`): `BigButton` (56px+
+touch target, per the brief's "large touch targets"), `TextField`,
+`Pill` (status chips), `Card`, `ScreenLoading`/`ErrorBanner`/
+`EmptyState`. Every screen in the app is built from these — no
+per-screen bespoke buttons.
+
+### 18.5 Navigation (Expo Router, `apps/mobile/app/`)
+
+The session-1 scaffold's 3-tab layout (Today/Upcoming/Profile) was
+**removed entirely** — see 18.6 for why "Upcoming" as a separate tab
+didn't survive contact with the brief's actual screen list, and why
+logout moved from a "Profile" tab into a one-line link on the Home
+screen's header instead. Final structure: `login` (unauthenticated) →
+`index` (Home/Today, the app's hub) → `visit/[id]/index` (Visit
+Detail) → four screens pushed **from** Visit Detail as modals
+(`presentation: "modal"`): `visit/[id]/photos`, `visit/[id]/
+inspection`, `visit/[id]/treatment/[caseTreatmentId]`, `visit/[id]/
+complete`. Navigation depth is never more than 2 (Home → Visit Detail
+→ one modal) — matches the brief's explicit "minimal navigation depth".
+Deleted as dead weight once the tabs were gone: `components/{Themed,
+StyledText,useClientOnlyValue{,.web}}.tsx`, `constants/Colors.ts`, the
+old `lib/api.ts` health-check-only wrapper, `components/
+ConnectionBanner.tsx`.
+
+### 18.6 Home / Today (`app/index.tsx`)
+
+Exactly the brief's list — today's visits, next visit, overdue/
+incomplete visits, simple status — nothing else. Three real queries
+(`useMyVisitsQuery`, server-scoped to the worker automatically, 3.15):
+today's date range (all statuses, so a done visit still shows as done
+rather than vanishing), and two "overdue" queries (still-`SCHEDULED`
+and still-`IN_PROGRESS` visits from *before* today, merged client-side
+— same derived-section pattern as the desktop dashboard, section
+17.6). "Prochaine visite" is computed as the earliest not-yet-done
+visit across both sets — deliberately surfaces an overdue visit ahead
+of a merely-upcoming one, since that's the more urgent thing to act on.
+Pull-to-refresh (`RefreshControl`) for a manual retry when offline.
+**A duplicate-rendering bug found and fixed this session**: the visit
+shown as "Prochaine visite" was *also* being rendered a second time
+inside the "Aujourd'hui" list below it (both draw from the same
+`todayItems` query) — found while debugging an unrelated Playwright
+test flake (18.9) that turned out to be caused by this exact
+duplication (two "En cours" pills on screen, only one actually
+visible). Fixed by filtering the next-visit's id out of the list
+FlatList's own `data` (the section's *count* still reflects every visit
+scheduled today — display-only dedup, not a data change).
+
+### 18.7 Visit Detail (`app/visit/[id]/index.tsx`) — the hub screen
+
+Everything the brief's Visit Detail section asks for: customer name +
+tap-to-call phone (`Linking.openURL('tel:...')`), property/address,
+problem description, scheduled time, assigned treatments (from `GET
+/cases/:id`, fetched alongside the visit — a worker always has case
+access here by construction, 3.15), and **previous relevant visits and
+photos** (case's other visits, most recent first, capped at 5, each
+with type/status/a one-line inspection summary and a thumbnail row of
+that visit's own photos — deliberately compact, no admin/audit
+information, matching the brief's "do not overwhelm the worker"). A
+tapped photo thumbnail opens `components/PhotoLightbox.tsx` (a plain
+RN `Modal`, no navigation route) for a full-screen look.
+
+Actions gate on visit status: `SCHEDULED` shows only "Démarrer la
+visite" (`POST /visits/:id/start`); once started, "Photos"/
+"Observations" buttons and any case treatments become tappable
+(pushing the four modal screens from 18.5), plus "Terminer la visite"
+(pushes the review screen, 18.8's requirement); a closed visit
+(`CANCELLED`/`NO_SHOW`) shows a one-line notice and no actions.
+
+### 18.8 Photos, Inspection, Treatment, Complete Visit (the four modals)
+
+- **`visit/[id]/photos.tsx`**: camera (`expo-image-picker`, primary
+  button) or gallery, multiple photos, preview (tap → lightbox), delete
+  before upload, optional per-photo caption (the backend has no
+  edit/delete-after-upload endpoint, so getting the caption right
+  *before* sending matters here more than on desktop — see 18's own
+  file doc comment). Photos accumulate locally first (`status:
+  "pending"`) rather than auto-uploading on capture — matches the
+  brief's explicit ordering ("preview, delete before upload"). A single
+  "Envoyer les photos (n)" button uploads every pending/failed photo
+  **sequentially, not in parallel** (brief: "respect mobile network
+  limitations" — a weak field connection shouldn't carry several
+  simultaneous uploads), each with a live per-photo progress percentage
+  and, on failure, a visible error + its own "Réessayer" button — never
+  a silent failure, matching "do not fake successful uploads".
+- **`visit/[id]/inspection.tsx`**: observations/condition/remarks,
+  three fields, nothing else ("keep it fast" per the brief). Saves for
+  real via `POST /visits/:id/inspection` independently of Complete
+  Visit.
+- **`visit/[id]/treatment/[caseTreatmentId].tsx`**: shows the catalog
+  treatment's description/instructions/**safety information** (visually
+  called out, warning-toned card — the brief's explicit ask), lets the
+  worker add notes and mark it performed (`PATCH /cases/:id/
+  treatments/:id`, the one write a worker is allowed on a case's
+  treatments — see 3.15/case-treatments.service.ts's existing
+  session-2 authorization).
+- **`visit/[id]/complete.tsx`**: read-only review — the brief's
+  explicit requirement ("before completing: photos, observations,
+  remarks should be visible/reviewable") — then one confirm button
+  (`POST /visits/:id/complete`). If any photo is still pending/failed
+  when the worker taps complete, a warning lets them go finish sending
+  it or complete anyway (never silently drops it — the local draft,
+  18.8's next paragraph, still has it either way).
+
+**Local draft persistence** (`lib/draftStore.ts`, `AsyncStorage`,
+documented per-visit): observations/condition/remarks text and captured
+photos' local URIs/captions/upload status are saved on every change,
+keyed per visit id, and only cleared once the visit is actually
+completed server-side. This is the brief's offline-considerations
+minimum, deliberately **not** a full offline sync engine (explicitly
+scoped out by the brief itself): a network failure or a backgrounded
+app never loses typed text or a captured photo (it just sits as
+"failed"/"pending", visibly, until the worker comes back to retry) —
+but if the app is never reopened on that visit again, nothing
+automatically retries in the background. Good enough for "don't lose
+work", not a promise of eventual sync — the file's own doc comment says
+exactly this, and where the line is.
+
+### 18.9 Verification performed this session
+
+- `pnpm -r typecheck` from repo root: all 4 packages clean (re-run
+  after every fix below, not just once at the end).
+- `pnpm --filter @msph/mobile exec expo export --platform web`: clean
+  production bundle, all 9 routes resolve with no bundler errors.
+- `pnpm --filter @msph/server test`: 36/36 still passing after the
+  storage driver + CORP header changes.
+- **A full Playwright-driven E2E run**, same rigor as the desktop's
+  session-3 test (17.14) but for the actual mobile UI this time (no
+  API call standing in for a screen that didn't exist yet): `expo
+  start --web` serving the real app, a real worker login, then: Home
+  screen shows the seeded visit under both "Prochaine visite" and
+  "Aujourd'hui" (deduped, 18.6) → open it → confirm customer/phone/
+  property/problem visible → "Démarrer la visite" → status flips to
+  "En cours" → open the case's assigned treatment → confirm
+  instructions + safety information both visible → add notes, mark
+  performed → back on Visit Detail, treatment shows "Effectué" →
+  Observations screen → fill and save all three fields → back on Visit
+  Detail, button shows a saved checkmark → Photos screen → pick a real
+  file via Playwright's file-chooser interception (the closest a
+  headless-browser E2E can get to "camera capture" — see 3.14 for why
+  the client's upload code had to grow a web transport at all) → "En
+  attente d'envoi" → tap send → **poll until "✓ Envoyée"**, i.e. the
+  server actually confirmed the upload (not a fake/optimistic
+  success) → back on Visit Detail, photo count updates → "Terminer la
+  visite" → review screen shows the exact observations/condition/
+  remarks/photos just entered → confirm → visit completes. All 15
+  steps passed, zero console errors, on the final run.
+- **Cross-checked from the manager's side**: after the mobile run, the
+  desktop app (Vite dev server, real login, navigated straight to the
+  same case) was screenshotted showing: case status "En cours",
+  workflow stepper advanced through Inspection/Traitement to Suivi, the
+  visit card "Terminée" with the worker's exact inspection text, the
+  treatment "Effectué" with the worker's exact notes, and a photo
+  attached — i.e. `apps/desktop`'s existing session-3 rendering of
+  `CaseWithRelations` (section 17.10) needed **zero changes** to show
+  the mobile session's work correctly, because both clients read the
+  same API. This is the brief's "the manager should see these changes
+  in the desktop app" requirement, verified visually, not assumed.
+- A real photo, uploaded through the actual UI, confirmed on disk
+  (`apps/server/storage/uploads/`) and re-fetchable over HTTP — not a
+  mocked network layer.
+
+### 18.10 Bugs found and fixed this session
+
+- **Home screen duplicate visit rendering** — 18.6.
+- **`Cross-Origin-Resource-Policy: same-origin` blocking photo loads
+  cross-origin** — section 5's dedicated writeup; found via the E2E
+  test's photo thumbnails failing, not by inspection.
+- **A React Native invariant crash**: `photo.caption && <Text>...` in
+  the photo list — when `caption` is `""` (a fresh photo's initial
+  draft value, not `null`), JS's `&&` returns the empty string itself
+  rather than `false`, and React Native (unlike plain DOM) throws
+  "Unexpected text node… cannot be a child of a `<View>`" for a raw
+  string child — this actually crashed the Photos screen mid-upload in
+  this session's own testing (the upload succeeded server-side but the
+  UI never updated to show it, because the crash happened exactly when
+  the photo's status flipped and the caption-render branch was hit).
+  Fixed by switching the falsy-string checks to an explicit ternary
+  (`photo.caption ? <Text>… : null`) everywhere this pattern appeared
+  with a possibly-empty-string (not just possibly-`null`) value.
+- **`expo-file-system`'s `UploadTask` has no web implementation** —
+  not fixable (native module gap in the library itself, confirmed by
+  reading its package source), *worked around* per 3.14 by adding an
+  `XMLHttpRequest`-based upload transport for `Platform.OS === "web"`
+  so this sandbox's E2E testing (and any future web deployment of this
+  Expo project) has a real, working upload path too.
+- **Server login rate-limiting hit during repeated manual E2E test
+  runs** (`authRateLimiter`, 20 requests/15 min/IP, session 2) — not a
+  product bug, just a reminder that repeated scripted logins against a
+  long-running dev server will eventually 429; resolved by restarting
+  the dev server (resets the in-memory limiter) between heavy test
+  iterations, not by weakening the limiter.
+
+## 19. Next steps (recommended order for the next session)
+
+1. **Storage driver hardening**: the desktop's "Ajouter une photo" form
+   still uses the metadata-only `POST /visits/:id/photos` endpoint (a
+   manual storageKey reference) rather than the new real upload endpoint
+   (section 5) — give it a real file picker against `POST /visits/:id/
+   photos/upload` instead, for parity with mobile.
+2. **Socket.IO auth** — connections are currently unauthenticated (noted
+   in both apps' `socket.ts` doc comments). Low priority while the
+   payloads stay minimal (`{caseId}`/`{caseId, visitId}`, no sensitive
+   data), but worth closing before this ships beyond internal use.
+3. **ESLint/Prettier** — carried over from sessions 1-3, still not done.
+4. **Electron packaging** (`electron-builder`) for distributable
+   installers, and an Expo/EAS build for the mobile app's real iOS/
+   Android binaries — nothing done here yet, dev-mode only for both.
+   This session's mobile verification (18.9) was necessarily
+   web-platform-only (no physical device/emulator in this sandbox) —
+   a real device pass (camera via `expo-image-picker`'s native path,
+   `UploadTask`'s native transport rather than the web XHR fallback,
+   push notification feasibility for realtime) is the highest-value
+   thing to do before this ships to actual field workers.
+5. Eventually: S3/R2 storage driver, email ingestion, an `OWNER` role
    tier if the business ever needs one (3.2), a real accessibility pass
-   on `SearchSelect`/`Modal`/`Drawer` (currently mouse-driven, functional
-   but not keyboard-exhaustive beyond Escape-to-close).
-7. Smaller desktop polish worth a look next time, not urgent: the cases
-   list's "last activity" column could use a real per-case last-activity
-   timestamp if a cheap backend query for it ever gets added (see
-   17.8's honesty note about `Case.updatedAt` being an approximation);
-   pagination controls on Customers/Properties/Treatments/Intervenants
-   pages currently just load up to 100 and don't paginate further (fine
-   at this company's scale, revisit if that stops being true).
+   on desktop's `SearchSelect`/`Modal`/`Drawer` (currently
+   mouse-driven), hoisting French labels into `packages/shared` now
+   that both real clients need them (3.13), a background sync queue for
+   mobile if offline usage patterns turn out to need more than the
+   current "don't lose the draft, retry visibly" approach (18.8).
+6. Smaller polish, not urgent: the desktop cases list's "last activity"
+   column could use a real per-case last-activity timestamp if a cheap
+   backend query for it ever gets added (17.8); desktop list pages cap
+   at 100 with no further pagination (fine at this company's scale);
+   mobile's logout confirmation uses `Alert.alert`, which is a no-op on
+   `react-native-web` (fine on real native — just not exercisable in a
+   browser-based E2E, see 18.9's own scope note).
 
-## 19. Commands reference
+## 20. Commands reference
 
 ```bash
 # Install everything (run from repo root)
@@ -687,7 +1061,15 @@ DATABASE_URL="postgresql://msph:msph_dev_password@localhost:5432/msph_test?schem
 pnpm dev:server      # http://localhost:4000, health at /api/health
 pnpm dev:desktop     # Electron + Vite (or just `pnpm --filter @msph/desktop exec vite`
                      # for the renderer alone in a browser tab, useful for quick checks)
-pnpm dev:mobile      # Expo — scan QR or press w/a/i in the terminal
+pnpm dev:mobile      # Expo — scan QR or press w/a/i in the terminal, or:
+EXPO_PUBLIC_API_BASE_URL=http://localhost:4000/api \
+EXPO_PUBLIC_SOCKET_URL=http://localhost:4000 \
+  pnpm --filter @msph/mobile exec expo start --web --port 8081
+                     # web platform (react-native-web) — no device/emulator
+                     # needed, how this session's own E2E testing ran (18.9).
+                     # Add http://localhost:8081 to the server's
+                     # CLIENT_ORIGIN (.env, comma-separated) or every
+                     # request 400s on CORS.
 
 # Checks
 pnpm typecheck                                   # every package
@@ -705,7 +1087,7 @@ service postgresql start
 # worker@msph.local / ChangeMe123! (WORKER)
 ```
 
-## 20. Environment variables
+## 21. Environment variables
 
 See `.env.example` at repo root for the full documented server list —
 copy it to `apps/server/.env` and fill in real values. Never commit
@@ -720,3 +1102,23 @@ Desktop-specific (optional, both have sane localhost defaults — see
 
 Set these via a `.env` file in `apps/desktop/` (Vite's standard
 mechanism) if the server ever runs somewhere other than localhost:4000.
+
+Mobile-specific (optional, same defaults — see `apps/mobile/lib/
+apiClient.ts` / `lib/socket.ts`):
+
+- `EXPO_PUBLIC_API_BASE_URL` — defaults to `http://localhost:4000/api`.
+  **Must be a LAN IP, not `localhost`, when testing with Expo Go on a
+  physical device** — `localhost` on the phone resolves to the phone
+  itself, not the dev machine.
+- `EXPO_PUBLIC_SOCKET_URL` — defaults to `EXPO_PUBLIC_API_BASE_URL` with
+  the trailing `/api` stripped.
+
+Set these in the shell before `expo start` (Expo's `EXPO_PUBLIC_*`
+convention — no `.env` loader needed for local dev) or in an `apps/
+mobile/.env` file (Expo also reads that automatically).
+
+Remember to add whatever origin actually serves a browser-based client
+(the desktop's `:5173`, mobile web's `:8081`, ...) to the server's own
+`CLIENT_ORIGIN` (comma-separated, see `.env.example`) — native mobile
+fetch (a real device/emulator, not web) sends no `Origin` header and is
+unaffected by this.
