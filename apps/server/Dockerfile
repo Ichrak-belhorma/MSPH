@@ -29,7 +29,19 @@
 # stage and how this fits Railway/Render/Fly.io/a plain VPS.
 
 FROM node:20-bookworm-slim AS base
-RUN corepack enable
+# `openssl` installed here (inherited by both `deps`->`build` and
+# `prod-deps` below) because `prisma generate` in those stages needs the
+# real library present to auto-detect the right engine for the `native`
+# binaryTarget — without it, detection silently guesses wrong (this is
+# what actually broke production: generate guessed "debian-openssl-1.1.x"
+# in a stage with no openssl installed, but the runtime stage correctly
+# detected 3.0.x, and the two didn't match). schema.prisma also now pins
+# `binaryTargets = ["native", "debian-openssl-3.0.x"]` explicitly as a
+# second, independent safety net — see its own comment.
+RUN corepack enable \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends openssl \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /repo
 
 # ---------------------------------------------------------------------
@@ -71,11 +83,10 @@ RUN pnpm --filter @msph/server prisma:generate
 # ---------------------------------------------------------------------
 # runtime — the actual production image. Non-root user, only compiled
 # output + production node_modules, no source/tests/dev tooling.
-# `openssl` installed explicitly: some slim Debian variants don't ship
-# it by default, and Prisma's query engine dynamically links against it
-# at runtime (this is the actual library the engine needs present, not
-# just at `prisma generate` time — the earlier crash happened here, in
-# the running container, not during the build).
+# `openssl` installed here too — this is the library the query engine
+# actually dynamically links against at request time, not just what
+# `prisma generate` needs to pick the right engine (see `base`'s comment
+# for that half of the story).
 # ---------------------------------------------------------------------
 FROM node:20-bookworm-slim AS runtime
 RUN corepack enable \

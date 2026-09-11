@@ -8,6 +8,16 @@
 
 generator client {
   provider = "prisma-client-js"
+  // "native" alone isn't reliable across Docker build stages — auto-
+  // detecting the OpenSSL version depends on `openssl` actually being
+  // installed in whichever stage runs `prisma generate`, which isn't
+  // guaranteed to match the final runtime stage's environment (this bit
+  // us in production: generate guessed "debian-openssl-1.1.x", the
+  // actual container had 3.0.x, and the engine binary silently didn't
+  // match — see CONTEXT.md session 8). Pinning both explicitly means
+  // the right engine ships regardless of what auto-detection guesses
+  // during the build.
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
