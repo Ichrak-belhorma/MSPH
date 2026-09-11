@@ -1,4 +1,4 @@
-import { CasePriority, CaseStatus, CaseTreatmentStatus, UserRole, VisitStatus, VisitType } from "../enums.js";
+import { CaseActivityType, CasePriority, CaseStatus, CaseTreatmentStatus, UserRole, VisitStatus, VisitType } from "../enums.js";
 
 /** Human-readable labels for UI — kept here so desktop and mobile never
  * disagree on wording. */
@@ -41,6 +41,24 @@ export const CASE_TREATMENT_STATUS_LABELS: Record<CaseTreatmentStatus, string> =
 export const USER_ROLE_LABELS: Record<UserRole, string> = {
   [UserRole.ADMIN]: "Admin",
   [UserRole.WORKER]: "Worker",
+};
+
+export const CASE_ACTIVITY_TYPE_LABELS: Record<CaseActivityType, string> = {
+  [CaseActivityType.CASE_CREATED]: "Case created",
+  [CaseActivityType.STATUS_CHANGED]: "Status changed",
+  [CaseActivityType.VISIT_SCHEDULED]: "Visit scheduled",
+  [CaseActivityType.VISIT_RESCHEDULED]: "Visit rescheduled",
+  [CaseActivityType.VISIT_CANCELLED]: "Visit cancelled",
+  [CaseActivityType.VISIT_STARTED]: "Visit started",
+  [CaseActivityType.VISIT_COMPLETED]: "Visit completed",
+  [CaseActivityType.INSPECTION_RECORDED]: "Inspection recorded",
+  [CaseActivityType.PHOTO_ADDED]: "Photo added",
+  [CaseActivityType.TREATMENT_ADDED]: "Treatment added",
+  [CaseActivityType.TREATMENT_UPDATED]: "Treatment updated",
+  [CaseActivityType.TREATMENT_REMOVED]: "Treatment removed",
+  [CaseActivityType.WORKER_ASSIGNED]: "Worker assigned",
+  [CaseActivityType.CASE_RESOLVED]: "Case resolved",
+  [CaseActivityType.CASE_CANCELLED]: "Case cancelled",
 };
 
 /** CaseStatus values that mean "nothing left to do". */

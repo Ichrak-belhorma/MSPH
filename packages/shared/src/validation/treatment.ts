@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CaseTreatmentStatus } from "../enums.js";
-import { optionalString, requiredString } from "./common.js";
+import { booleanQueryParam, cuidSchema, optionalString, paginationQuerySchema, requiredString } from "./common.js";
 
 export const createTreatmentSchema = z.object({
   name: requiredString("Name", 150),
@@ -17,11 +17,19 @@ export type CreateTreatmentInput = z.infer<typeof createTreatmentSchema>;
 export const updateTreatmentSchema = createTreatmentSchema.partial();
 export type UpdateTreatmentInput = z.infer<typeof updateTreatmentSchema>;
 
+export const treatmentListQuerySchema = paginationQuerySchema.extend({
+  /** Defaults to true server-side (hide retired treatments from the
+   * picker) — pass active=false explicitly to see retired ones too. */
+  active: booleanQueryParam.optional(),
+  search: z.string().trim().max(200).optional(),
+});
+export type TreatmentListQuery = z.infer<typeof treatmentListQuerySchema>;
+
 /** Manager attaches one or more catalog treatments to a case (step 6-7 of
  * the workflow: "the company chooses one or several treatments"). */
 export const assignTreatmentToCaseSchema = z.object({
-  treatmentId: z.string().cuid(),
-  visitId: z.string().cuid().optional(),
+  treatmentId: cuidSchema,
+  visitId: cuidSchema.optional(),
   notes: optionalString(2000),
 });
 export type AssignTreatmentToCaseInput = z.infer<typeof assignTreatmentToCaseSchema>;

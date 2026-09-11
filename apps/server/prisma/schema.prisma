@@ -60,6 +60,24 @@ enum CaseTreatmentStatus {
   CANCELLED
 }
 
+enum CaseActivityType {
+  CASE_CREATED
+  STATUS_CHANGED
+  VISIT_SCHEDULED
+  VISIT_RESCHEDULED
+  VISIT_CANCELLED
+  VISIT_STARTED
+  VISIT_COMPLETED
+  INSPECTION_RECORDED
+  PHOTO_ADDED
+  TREATMENT_ADDED
+  TREATMENT_UPDATED
+  TREATMENT_REMOVED
+  WORKER_ASSIGNED
+  CASE_RESOLVED
+  CASE_CANCELLED
+}
+
 // ---------------------------------------------------------------------------
 // People & auth
 // ---------------------------------------------------------------------------
@@ -80,6 +98,7 @@ model User {
   uploadedPhotos          Photo[]         @relation("PhotoUploader")
   performedCaseTreatments CaseTreatment[] @relation("CaseTreatmentPerformer")
   refreshTokens           RefreshToken[]
+  caseActivities          CaseActivity[]  @relation("CaseActivityActor")
 
   @@map("users")
 }
@@ -174,11 +193,33 @@ model Case {
   visits     Visit[]
   photos     Photo[]
   treatments CaseTreatment[]
+  activities CaseActivity[]
 
   @@index([customerId])
   @@index([propertyId])
   @@index([status])
   @@map("cases")
+}
+
+/// Append-only timeline/audit log for a case — see CONTEXT.md "Case
+/// timeline design" for why this exists instead of trying to reconstruct
+/// history from Case.status alone. One row per meaningful thing that
+/// happens to a case, written in the same request that performs the
+/// action (never a background job / never derived after the fact).
+model CaseActivity {
+  id        String           @id @default(cuid())
+  caseId    String
+  type      CaseActivityType
+  message   String
+  metadata  Json?
+  actorId   String?
+  createdAt DateTime         @default(now())
+
+  case  Case  @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  actor User? @relation("CaseActivityActor", fields: [actorId], references: [id])
+
+  @@index([caseId, createdAt])
+  @@map("case_activities")
 }
 
 // ---------------------------------------------------------------------------

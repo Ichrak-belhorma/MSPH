@@ -1,4 +1,5 @@
 import type {
+  CaseActivityType,
   CasePriority,
   CaseStatus,
   CaseTreatmentStatus,
@@ -130,12 +131,30 @@ export interface CaseTreatment {
   updatedAt: string;
 }
 
+export interface CaseActivity {
+  id: string;
+  caseId: string;
+  type: CaseActivityType;
+  /** Short human-readable summary generated server-side at write time, e.g.
+   * "Visit scheduled for Jan 12, 2pm (Initial Inspection)" — clients render
+   * this directly rather than re-deriving text from `type` + `metadata`. */
+  message: string;
+  /** Free-form structured detail for consumers that want more than the
+   * message text (e.g. the visit id a VISIT_SCHEDULED event refers to). */
+  metadata: Record<string, unknown> | null;
+  /** The user who performed the action. Null for system-derived events
+   * (e.g. an automatic status recalculation with no single actor). */
+  actorId: string | null;
+  createdAt: string;
+}
+
 /** Case with its most commonly needed relations expanded — the shape the
  * case detail screen (desktop) and visit detail screen (mobile) work with. */
 export interface CaseWithRelations extends Case {
   customer: Customer;
   property: Property & { landlord: Landlord | null };
-  visits: Visit[];
+  visits: (Visit & { assignedWorker: Pick<User, "id" | "firstName" | "lastName"> | null; inspection: Inspection | null })[];
   photos: Photo[];
   treatments: (CaseTreatment & { treatment: Treatment })[];
+  activities: CaseActivity[];
 }

@@ -10,13 +10,15 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -b",
     "start": "node dist/index.js",
-    "typecheck": "tsc -b --noEmit false --force && echo ok",
+    "typecheck": "tsc -b --noEmit false --force && tsc -p tsconfig.test.json && echo ok",
     "clean": "rm -rf dist *.tsbuildinfo",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
-    "prisma:seed": "tsx prisma/seed.ts"
+    "prisma:seed": "tsx prisma/seed.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -28,6 +30,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
+    "express-rate-limit": "^7.4.1",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
@@ -40,8 +43,11 @@
     "@types/jsonwebtoken": "^9.0.7",
     "@types/morgan": "^1.9.9",
     "@types/node": "^20.16.11",
+    "@types/supertest": "^6.0.2",
     "prisma": "^5.20.0",
+    "supertest": "^7.0.0",
     "tsx": "^4.19.1",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
   }
 }

@@ -39,7 +39,39 @@ export const optionalPhoneSchema = phoneSchema
   .optional()
   .or(z.literal("").transform(() => undefined));
 
-export const cuidSchema = z.string().cuid();
+/**
+ * Validates an id field referencing a row created by Prisma's
+ * `@default(cuid())`.
+ *
+ * Deliberately NOT `z.string().cuid()` (which enforces the exact cuid
+ * algorithm's character format): seed data intentionally uses
+ * human-readable ids for a few fixtures (e.g. "seed-case-1",
+ * "general-cockroach-treatment" — see apps/server/prisma/seed.ts) so a
+ * developer can reference them by hand while testing, and id format is
+ * otherwise an implementation detail the API shouldn't be coupled to (it
+ * could change to UUIDs later without touching every schema). This still
+ * rejects the actually-invalid cases — empty, absurdly long, or the
+ * wrong type — a real 404 from Prisma handles "well-formed but unknown
+ * id" the same way either strategy would.
+ */
+export const cuidSchema = z
+  .string()
+  .trim()
+  .min(1, "id is required")
+  .max(191, "id is too long");
+
+/**
+ * A boolean query-string param ("?active=false").
+ *
+ * `z.coerce.boolean()` is a trap here: it does `Boolean(value)`, and
+ * `Boolean("false")` is `true` (any non-empty string is truthy) — so
+ * `?active=false` would silently mean "true". This accepts only the
+ * literal strings "true"/"false" (or an actual boolean, for callers that
+ * construct the query object directly rather than parsing a URL).
+ */
+export const booleanQueryParam = z
+  .union([z.literal("true"), z.literal("false"), z.boolean()])
+  .transform((v) => (typeof v === "boolean" ? v : v === "true"));
 
 export const paginationQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),

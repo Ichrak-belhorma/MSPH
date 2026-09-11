@@ -4,7 +4,8 @@
 persistent memory of the project. Do not redo completed work — check
 "Current status" and "Next steps" first and continue from there.
 
-Last updated: 2026-09-11 (session 1 — initial foundation build).
+Last updated: 2026-09-11 (session 2 — backend API: auth, all resource
+modules, authorization, case timeline, tests).
 
 ---
 
@@ -22,403 +23,622 @@ chooses treatment(s) → treatment + follow-up visits happen → case is
 marked resolved.
 
 Full product/domain spec as given by the project owner is preserved in the
-original task description that started this project (not duplicated here
+original task descriptions that started this project (not duplicated here
 in full — this file records decisions and current state, not the brief).
 
-## 2. Platforms & tech stack (as specified, all in place)
+## 2. Platforms & tech stack
 
 - **apps/server** — Node.js + Express + TypeScript, Prisma ORM, PostgreSQL,
-  Socket.IO, Zod validation, JWT (access+refresh) planned, Argon2 for
-  password hashing (dependency installed, not wired into routes yet).
-- **apps/desktop** — Electron + React + TypeScript + Vite. Manager/admin app.
+  Socket.IO, Zod validation, JWT access+refresh auth (Argon2 password
+  hashing), vitest + supertest tests. **The full REST API is implemented
+  and tested as of session 2** — see section 8.
+- **apps/desktop** — Electron + React + TypeScript + Vite. Manager/admin
+  app. Still placeholder screens except Dashboard's health check — does
+  not call the case/visit/etc. API yet.
 - **apps/mobile** — Expo (SDK 57) + React Native + TypeScript, using
-  **Expo Router** (file-based routing) for navigation. Worker field app.
+  **Expo Router** (file-based routing). Worker field app. Same status as
+  desktop — screens exist, not wired to the real API yet.
 - **packages/shared** — domain types, Zod schemas, enums, constants. Both
   apps and the server import from `@msph/shared`; nothing is duplicated.
 - **Package manager**: pnpm workspaces (`pnpm-workspace.yaml`). Pinned via
-  `packageManager` in root `package.json` — currently `pnpm@10.34.5`
-  (10.9.7, a plausible-looking version at the time this was written, no
-  longer resolves on the registry — if `pnpm install` ever fails with
-  `ERR_PNPM_NO_MATCHING_VERSION`, bump this field to whatever `pnpm
-  --version` reports on the machine and re-run).
+  `packageManager` in root `package.json` — currently `pnpm@10.34.5`. If
+  `pnpm install` ever fails with `ERR_PNPM_NO_MATCHING_VERSION`, bump this
+  field to whatever `pnpm --version` reports on the machine and re-run.
+  `pnpm-workspace.yaml` also carries an `allowBuilds` block (native
+  postinstall scripts for `argon2`, `electron`, `@prisma/client`,
+  `@prisma/engines`, `esbuild`, `prisma`) written by `pnpm approve-builds
+  --all` in session 1 — a fresh `pnpm install` on this machine won't
+  re-prompt for those.
 
 The desktop and mobile apps have **no local database and no duplicated
-business logic** — everything goes through the Express API. This was
-followed strictly in this session (see `apps/desktop/src/lib/api.ts` and
-`apps/mobile/lib/api.ts` — both are thin fetch wrappers, nothing else).
+business logic** — everything goes through the Express API.
 
-## 3. Domain decisions (deviations from the literal brief, and why)
+## 3. Domain decisions (deviations from the brief, and why)
 
-The brief said "do not blindly implement [the suggested statuses] if a
-better model fits — document the decision here." Decisions made:
+### 3.1 Case.status is 5 states, not 8 (session 1, still the design)
 
-### 3.1 Case.status is 5 states, not 8
-
-Brief suggested: NEW / SCHEDULED / INSPECTION_COMPLETED / TREATMENT_PLANNED
-/ FOLLOW_UP_SCHEDULED / IN_PROGRESS / RESOLVED / CANCELLED (implies a
-linear progression).
+Brief suggested a linear list: NEW / SCHEDULED / INSPECTION_COMPLETED /
+TREATMENT_PLANNED / FOLLOW_UP_SCHEDULED / IN_PROGRESS / RESOLVED /
+CANCELLED.
 
 **Decision**: `Case.status` is `NEW | SCHEDULED | IN_PROGRESS | RESOLVED |
-CANCELLED` (see `packages/shared/src/enums.ts`, heavily commented).
+CANCELLED` (`packages/shared/src/enums.ts`).
 
-**Why**: a case is not linear — it can loop through several
-inspection/treatment/follow-up visits before resolution (e.g. treatment →
-follow-up → treatment again → follow-up → resolved). A single field with
-one value per linear stage can't represent "on the 2nd follow-up" without
-either adding more enum values forever or reusing existing ones
-incorrectly. Instead, the fine-grained stage lives on the **visit history**
-(`Visit` rows, ordered by `scheduledAt`/`completedAt`), which naturally
-supports any number of loops. `Case.status` stays a coarse bucket good
-enough for Kanban-style dashboard columns.
+**Why**: a case loops through inspection/treatment/follow-up visits an
+arbitrary number of times before resolution — a single linear field can't
+represent "on the 2nd follow-up" without infinite enum growth. The
+fine-grained stage lives on the **visit history** instead, and — new in
+session 2 — on the **case activity timeline** (section 3.7). `Case.status`
+stays a coarse bucket for dashboard columns.
 
-**Consequence for the dashboard**: "which consultations are scheduled",
-"which interventions are upcoming", "which cases are waiting for
-follow-up" are **not** `Case.status` filters — they're queries against
-`Visit` (by `type` + `scheduledAt` + `status`). This is not yet
-implemented (no cases/visits API exists yet — see Next steps) but the
-schema supports it and `apps/desktop/src/pages/DashboardPage.tsx` has a
-comment explaining this so nobody "fixes" it into a status filter later.
+**Session 2 implements this as a real state machine**, not just a
+documented intention — see section 9 "Case status state machine" for the
+full mechanics (`apps/server/src/modules/cases/case-status.ts`).
 
-### 3.2 User roles: ADMIN + WORKER (not ADMIN, OWNER, WORKER)
+### 3.2 User roles: ADMIN + WORKER (session 1, unchanged)
 
-Brief listed roles as "ADMIN / OWNER" and "WORKER" — read as one admin-tier
-role written with a slash, not two separate roles. Implemented as a single
-`ADMIN` role plus `WORKER`. If the business later needs an owner tier with
-narrower admin permissions removed (billing-only access, etc.), add an
-`OWNER` value to the `UserRole` enum then — nothing here assumes exactly
-two roles beyond the enum itself.
+"ADMIN / OWNER" in the brief is read as one admin-tier role written with a
+slash, not two roles. If a narrower OWNER tier is ever needed, add it to
+the `UserRole` enum then.
 
-### 3.3 Property has no direct `customerId`
+### 3.3 Property has no direct `customerId` (session 1, unchanged)
 
-`Property` links to `Landlord` (the owner, stable over time) but not
-directly to `Customer`. The customer relationship is per-`Case`
-(`Case.customerId` + `Case.propertyId`). This models rental turnover
-correctly: the landlord owns the property regardless of who currently
-lives there; the tenant/customer reporting an issue can change between
-cases at the same property.
+`Property` links to `Landlord` (stable owner); the tenant/customer
+relationship is per-`Case`, modeling rental turnover correctly.
 
-### 3.4 Visit/Inspection split, and `condition` is free text
+### 3.4 Visit/Inspection split, `condition` is free text (session 1, unchanged)
 
-`Visit` is the schedulable event (has a worker, a time, a type, a status).
-`Inspection` is the on-site record a worker fills in when completing a
-visit (observations, remarks, condition) — one-to-one with `Visit`,
-created on completion. `condition` is a free-text field, not an enum —
-pest/property conditions vary too widely to enumerate usefully for v1.
+### 3.5 `CaseTreatment.status` (PLANNED/COMPLETED/CANCELLED) (session 1, unchanged)
 
-### 3.5 Added `CaseTreatment.status` (PLANNED/COMPLETED/CANCELLED)
+### 3.6 IDs are `cuid()`, but validated loosely (session 2 change)
 
-Not explicitly in the brief's field list for `CaseTreatment`, but needed:
-"the company chooses a treatment" (planned) happens before "the treatment
-was performed" (completed) — these are two different moments in time and
-the UI needs to distinguish "planned, not done yet" from "done".
+Prisma still generates real cuids for every row (`@default(cuid())`,
+unchanged). **What changed**: `packages/shared/src/validation/common.ts`'s
+`cuidSchema` no longer enforces the literal cuid character format
+(`z.string().cuid()`) — it's now `z.string().trim().min(1).max(191)`.
 
-### 3.6 IDs are `cuid()`, not auto-increment integers
+**Why**: `apps/server/prisma/seed.ts` intentionally uses human-readable
+ids for dev fixtures (`"seed-case-1"`, `"general-cockroach-treatment"`,
+...) so a developer can reference them by hand while testing by hitting
+the API directly. Strict cuid validation rejected those as 400s the
+instant this session tried to `POST /cases/:id/treatments` with
+`treatmentId: "general-cockroach-treatment"` during manual smoke testing
+— a real bug caught and fixed, not a hypothetical. Loosening the
+validator also decouples the API contract from a specific id-generation
+algorithm (could move to UUIDs later without touching every Zod schema).
+A well-formed-but-unknown id still 404s from the Prisma lookup either way.
 
-Standard Prisma choice for a system where IDs may eventually be created
-client-side or need to be non-guessable (photo URLs, etc.). No strong
-reason to deviate; consistent across all models.
+### 3.7 `CaseActivity` — a dedicated timeline/audit model (session 2, new)
 
-## 4. Realtime design (Socket.IO) — intentionally minimal so far
+The brief asked "consider whether a dedicated activity/event model is
+useful" for reconstructing the case timeline (creation, scheduling, visit
+started, inspection completed, photos uploaded, remarks added, treatment
+selected/performed, follow-up scheduled/completed, resolution).
 
-Per the "don't over-engineer realtime yet" instruction, only the transport
-skeleton exists (`apps/server/src/realtime/socket.ts`): a Socket.IO server
-attached to the same HTTP server as Express, with `case:join` / `case:leave`
-room handlers. **No domain events are emitted yet** — nothing calls
-`getIO().to(...).emit(...)` anywhere. The event *names* are already fixed
-in `packages/shared/src/constants/index.ts` (`SOCKET_EVENTS`) so both
-client apps can start listening for them before the server emits them:
+**Decision: yes**, added `CaseActivity` (`apps/server/prisma/schema.prisma`,
+`packages/shared/src/enums.ts`'s `CaseActivityType`, 15 event kinds).
+Append-only, one row per meaningful thing that happens to a case, always
+written **in the same Prisma transaction** as the mutation it describes
+(`apps/server/src/modules/cases/case-activity.ts`'s `logCaseActivity`) —
+never a best-effort side effect, so the timeline can never drift from what
+actually happened or go missing if a later step in the same request fails.
 
-- `case:created`, `case:updated` — broadcast to a global `cases` room
-  (not yet joined by anything — needs a "join cases room on dashboard
-  mount" convention once the dashboard is real).
-- `visit:created`, `visit:updated` — broadcast to `case:${caseId}` rooms
-  only, so clients don't receive updates for cases they're not looking at.
+Each row carries a server-generated human-readable `message` (not
+derived generically from `type` at read time — written in plain English
+at the call site, e.g. `"Initial Inspection visit scheduled for
+2026-09-11T13:50:36.000Z"`), an optional `metadata` JSON blob (e.g.
+`{visitId}`) for consumers that want structured detail, and an optional
+`actorId` (null for the rare system-derived event, though every event in
+practice today has a real actor). Exposed via `GET /cases/:id/timeline`
+and embedded (fully, ordered) in `GET /cases/:id` under `activities`.
 
-**Why this shape**: broadcasting every mutation to every client doesn't
-scale and isn't necessary — a desktop dashboard cares about *any* case
-changing (so it can refresh a list/count), but a case detail screen only
-cares about *its* case. Deliberately not building more than this until
-the routes that would emit these events exist.
+This is the mechanism that actually satisfies "make the workflow
+explicit" — the coarse `Case.status` enum was never going to carry that
+by itself.
 
-## 5. File storage — abstraction not yet built
+### 3.8 `POST /cases` accepts existing OR new customer/property (session 2, new)
 
-`STORAGE_DRIVER=local` is defined in env config
-(`apps/server/src/config/env.ts`) and the Express app already serves
-`/uploads` as static files from `STORAGE_LOCAL_ROOT`
-(`apps/server/storage/uploads/`, gitignored except `.gitkeep`). **No
-storage interface/driver code exists yet** — no photo upload route, no
-`src/storage/` module. When building it: define a small
-`StorageDriver` interface (`put(key, stream) -> {key, url}`, `getUrl(key)`,
-maybe `delete(key)`) with a `LocalStorageDriver` implementation now and
-leave room for `S3StorageDriver`/`R2StorageDriver` later, selected by
-`STORAGE_DRIVER` at boot. `Photo.storageKey` + `Photo.url` in the schema
-already anticipate this.
+Brief's manual intake workflow always nests a brand-new customer +
+property. In practice a manager often reports on an existing customer
+(repeat call) or an already-serviced property (rental turnover) — so
+`createCaseSchema` (`packages/shared/src/validation/case.ts`) accepts
+`customerId` **or** `customer` (nested new-customer object), same for
+`property`/`propertyId`, enforced via `superRefine` (exactly one of each
+pair, clear per-field error messages rather than a discriminated-union
+dump). `property.landlordId` vs `property.landlord` works the same way
+one level down.
 
-## 6. Auth — not implemented yet, deliberately
+### 3.9 `DELETE /cases/:id/treatments/:treatmentId` → keyed by the join row's own id (session 2, deviation)
 
-Dependencies are installed (`jsonwebtoken`, `argon2`) and env vars are
-defined (`JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, TTLs) and validated at
-boot. Zod schemas for login/refresh/change-password exist in
-`packages/shared/src/validation/auth.ts`. The `RefreshToken` Prisma model
-(stores a hash, not the raw token) is in the schema. **But there is no
-`/api/auth` route, no JWT middleware, no password verification code.**
-Mobile's login screen (`apps/mobile/app/login.tsx`) is a UI-only stub that
-navigates straight into the app. This was a deliberate scope cut for this
-session ("don't over-engineer auth yet — foundation first").
+Brief's literal path suggests deleting by the catalog `treatmentId`. Since
+a case could in principle have the same catalog treatment attached more
+than once across multiple rounds, that's ambiguous. Implemented as
+`DELETE /cases/:id/treatments/:caseTreatmentId` — keyed by
+`CaseTreatment.id`, the join row's own unambiguous id. Same reasoning
+applies to the `PATCH` "record execution" endpoint.
 
-## 7. What's built (this session — session 1)
+### 3.10 Extra endpoints beyond the brief's example list (session 2, additions)
 
-### Root
-- `package.json` (pnpm workspace root, scripts), `pnpm-workspace.yaml`,
-  `tsconfig.base.json` (shared strict TS config), `.gitignore`,
-  `.editorconfig`, `.env.example` (documents every server env var),
-  `README.md`.
+The brief said "do not blindly follow this endpoint list if REST/domain
+conventions suggest something better." Additions made:
 
-### packages/shared
-- `src/enums.ts` — all domain enums (see section 3).
-- `src/types/entities.ts` — API-facing entity interfaces (ISO date strings,
-  mirrors Prisma models field-for-field) + `CaseWithRelations`.
-- `src/types/api.ts` — `ApiErrorBody`, `AuthTokens`, `LoginResponse`,
-  `HealthCheckResponse`.
-- `src/validation/*.ts` — Zod schemas: `common` (shared primitives —
-  required/optional string, email, phone, pagination), `auth`, `people`
-  (customer/landlord/property/user update + create-user schemas), `case`
-  (the manual intake workflow — `createCaseSchema` nests
-  customer/property/landlord creation in one call, matching the product
-  brief's step-by-step intake), `visit`, `treatment`, `photo`.
-- `src/constants/index.ts` — UI labels for every enum, `SOCKET_EVENTS`,
-  `DEFAULT_PAGE_SIZE`, `TERMINAL_CASE_STATUSES`.
-- Builds with `tsc -b` to `dist/` (ESM, `.js` extensions on all relative
-  imports — required for both `moduleResolution: Bundler` (desktop/vite)
-  and `NodeNext` (server) to resolve it correctly).
+- `GET/PATCH /landlords/:id` — brief only showed `GET/POST`; added for
+  parity with customers/properties (an admin needs to fix a landlord's
+  phone number eventually).
+- `POST /users`, `GET/PATCH /users/:id`, `GET /users` — not in the
+  brief's example list at all, but required by "Admin: manage workers"
+  and by there being no self-registration (accounts only exist because an
+  admin created them).
+- `POST /auth/change-password` — self-service password rotation, not
+  listed but a basic security expectation once auth exists; revokes every
+  other refresh token for that user on success.
+- `POST /visits/:id/inspection` — brief listed this explicitly; it's
+  additionally reachable through `POST /visits/:id/complete` (which
+  accepts the same three fields inline) since a worker filling in the
+  inspection is almost always also completing the visit in the same
+  moment — both paths `upsert` the same `Inspection` row.
 
-### apps/server
-- `prisma/schema.prisma` — full domain model: `User`, `RefreshToken`,
-  `Customer`, `Landlord`, `Property`, `Case`, `Visit`, `Inspection`,
-  `Photo`, `Treatment`, `CaseTreatment`, all enums. Migrated and applied
-  (see section 8).
-- `prisma/seed.ts` — upserts one admin user (`admin@msph.local` /
-  `ChangeMe123!`, Argon2-hashed) and two starter treatments.
-- `src/config/env.ts` — Zod-validated env loading, fails fast on boot with
-  readable errors if misconfigured.
-- `src/lib/prisma.ts` — singleton Prisma Client (survives `tsx watch`
-  hot-reload via `globalThis`).
-- `src/lib/logger.ts` — minimal structured JSON console logger.
-- `src/middleware/errorHandler.ts` — `ApiError` class (`.notFound()`,
-  `.badRequest()`, etc. factories), central `errorHandler` that also
-  turns `ZodError`s into a field-level `{error:{code,message,details}}`
-  body, `notFoundHandler` for unmatched routes.
-- `src/middleware/validate.ts` — `validateBody`/`validateQuery` helpers
-  (parse-and-replace `req.body`/`req.query` against a Zod schema).
-- `src/routes/health.routes.ts` + `src/routes/index.ts` — `GET
-  /api/health` checks real DB connectivity via `SELECT 1`.
-- `src/realtime/socket.ts` — Socket.IO skeleton (see section 4).
-- `src/app.ts` — Express app: helmet, cors (locked to `CLIENT_ORIGIN`),
-  json/urlencoded body parsing, morgan logging, static `/uploads`,
-  `/api` router mount, 404 + error handlers.
-- `src/index.ts` — boots HTTP server + Socket.IO, graceful shutdown on
-  SIGINT/SIGTERM.
-- `.env` (gitignored, real dev values) and `.env.example`-equivalent
-  content is in the root `.env.example` — **server reads its `.env` from
-  `apps/server/.env`**, not the root file; the root one is documentation
-  you copy from.
+## 4. Realtime design (Socket.IO) — now wired
 
-### apps/desktop
-- Electron main process: `electron/main.cts` + `electron/preload.cts`
-  (⚠️ **must stay `.cts`/emit `.cjs`** — see section 9.1 for why).
-  Compiled by a separate `tsconfig.electron.json` (CommonJS) to
-  `dist-electron/`.
-- Vite + React renderer: `src/main.tsx`, `src/App.tsx` (HashRouter — plain
-  BrowserRouter can't resolve nested paths under `file://` in a packaged
-  app), `src/components/AppShell.tsx` (sidebar nav), `src/lib/api.ts`
-  (fetch wrapper, mirrors mobile's), `src/styles/global.css`.
-- Pages (all placeholders except Dashboard, which does a real health-check
-  round trip): `DashboardPage`, `CasesPage`, `CalendarPage`,
-  `CustomersPage`, `PropertiesPage`, `LandlordsPage`, `WorkersPage`,
-  `TreatmentsPage`, `SettingsPage` — in `src/pages/`.
-- Nav covers every top-level section named in the brief (Dashboard, Cases,
-  Calendar, Customers, Properties, Landlords, Workers, Treatments,
-  Settings).
+Session 1 built the transport skeleton only. **Session 2 wires real
+emits**: `apps/server/src/realtime/socket.ts` exports
+`emitCaseCreated/emitCaseUpdated/emitVisitCreated/emitVisitUpdated`,
+called from `cases.routes.ts` / `visits.routes.ts` / `case-treatments`
+mutations after each successful write. All helpers no-op quietly if
+`initSocket()` was never called (true in tests, which build the Express
+app directly via `createApp()` without booting an HTTP+Socket.IO server —
+an HTTP request must never fail because of realtime). Event shape
+unchanged from session 1's design: `cases` room for list-level changes,
+`case:${caseId}` room for a specific case's detail view.
 
-### apps/mobile
-- Generated from Expo's official `tabs` template (`create-expo-app
-  --template tabs`, Expo SDK 57, React 19, RN 0.86, Expo Router with
-  typed routes) and then customized — this was much more reliable than
-  hand-rolling Metro/Babel config from scratch, and is the officially
-  supported Expo project shape.
-- Routes (`app/` — file-based, Expo Router):
-  - `(tabs)/index.tsx` — **Today** (today's visits; placeholder empty
-    state + live `ConnectionBanner` health check).
-  - `(tabs)/upcoming.tsx` — **Upcoming** visits placeholder.
-  - `(tabs)/profile.tsx` — worker profile placeholder, links to login.
-  - `login.tsx` — UI-only login stub (see section 6).
-  - `visit/[id].tsx` — visit detail placeholder with the action buttons
-    the brief calls for (start visit / take photo / add remark / complete
-    visit) — not wired to anything yet.
-  - `+not-found.tsx` — kept from the template.
-- `lib/api.ts` — fetch wrapper (same contract as desktop's). Reads
-  `EXPO_PUBLIC_API_BASE_URL` — **must be a LAN IP, not `localhost`, when
-  testing on a physical device via Expo Go** (documented in the file).
-- `components/ConnectionBanner.tsx` — reusable health-check banner.
-- `constants/Colors.ts` — retinted to the same teal (`#0f6e5c`) as the
-  desktop app's `--color-primary`, light+dark variants.
-- `app.json` — renamed to MSPH, added `expo-image-picker` plugin +
-  Android `CAMERA` permission (needed once photo capture is built) and a
-  camera-usage description string.
+**Not done**: no client (desktop/mobile) actually calls `socket.emit(
+JOIN_CASE_ROOM, ...)` or listens for these events yet — that's UI wiring,
+next session.
 
-## 8. Current status — verified working end-to-end (session 1)
+## 5. File storage — still just the abstraction boundary, no driver yet
 
-All of the following were actually run and confirmed, not assumed:
+Unchanged from session 1: `STORAGE_DRIVER=local` env var exists and is
+validated at boot, `/uploads` is statically served from
+`STORAGE_LOCAL_ROOT`, but there is still no `src/storage/` module and no
+binary upload endpoint. **Session 2's `POST /visits/:id/photos` is
+metadata-only** (`AddVisitPhotoInput`: `storageKey`, optional `url`,
+optional `caption`) — matches the brief's item 13, "Photos metadata", not
+a binary upload. When the storage driver is eventually built, this
+endpoint stays the same shape; only where `storageKey` comes from changes
+(a prior upload step returns it instead of the client making one up).
 
-- `pnpm install` at root installs all 5 workspace packages.
-- `pnpm approve-builds --all` was run once (needed for `argon2`, `electron`,
-  `@prisma/client`/`@prisma/engines`, `prisma`, `esbuild` native
-  postinstall scripts) — the choice is now recorded in
-  `pnpm-workspace.yaml`'s `allowBuilds` block, so a fresh `pnpm install`
-  on this machine won't prompt again.
-- `pnpm --filter @msph/shared build` — clean.
-- `pnpm -r typecheck` (shared, server, desktop, mobile) — all clean, run
-  from repo root.
-- PostgreSQL 16 running locally in this dev container; created role
-  `msph`/`msph_dev_password` and database `msph_dev` (matches
-  `apps/server/.env`'s `DATABASE_URL`). **This is dev-container-local
-  setup, not committed anywhere except as the example in
-  `.env.example`** — a fresh machine needs its own Postgres instance and
-  its own `apps/server/.env`.
-- `pnpm --filter @msph/server prisma:migrate` — applied migration
-  `20260911112014_init`, created all 12 tables.
-- `pnpm --filter @msph/server prisma:seed` — seeded admin user + 2
-  treatments.
-- Started the server (`pnpm dev` in `apps/server`) and confirmed:
-  - `GET /api/health` → `200 {"status":"ok",...,"database":"connected"}`.
-  - `GET /api/nonsense` → `404` with the standard `ApiErrorBody` shape.
-  - `GET /socket.io/?EIO=4&transport=polling` → `200`, Socket.IO responds.
-- Built desktop for production (`pnpm build` in `apps/desktop`) — Vite
-  renderer + both `tsc` passes succeed.
-- Started the Vite dev server standalone (port 5173) — serves the app.
-- Launched the actual Electron window under `xvfb-run` (this container has
-  no real display) — **it opened and loaded the Vite dev app**, confirming
-  the whole Electron+Vite+React wiring genuinely works, not just
-  typechecks. (Without Xvfb, Electron fails with "Missing X server or
-  $DISPLAY" — expected in any headless container; on a real desktop/dev
-  machine `pnpm dev` in `apps/desktop` just works.)
-- Mobile: `pnpm typecheck` clean; `expo export --platform web` produced a
-  working static bundle for every route (`/login`, `/`, `/profile`,
-  `/upcoming`, `/visit/[id]`, `/_sitemap`, `/+not-found`); started `expo
-  start --web` and confirmed Metro bundler serves `http://localhost:8081`
-  (`/status` → `packager-status:running`).
-- All background dev processes (server, vite, electron, expo/metro) were
-  stopped again after verification — nothing is left running.
+## 6. Authentication — implemented (session 2)
 
-**Nothing beyond the foundation above is implemented.** There is no
-working login, no case list, no ability to actually create a case, no
-photo upload, no calendar. Every non-Dashboard desktop page and every
-mobile screen beyond Today's connection banner is a placeholder. This is
-intentional per the "foundation first, don't over-engineer yet"
-instruction — see Next steps for the build order.
+- **Password hashing**: Argon2id (`apps/server/src/lib/password.ts`,
+  argon2's own default — stronger than bcrypt against GPU cracking at
+  equivalent cost).
+- **Access token**: JWT, `{sub, role}`, signed with `JWT_ACCESS_SECRET`,
+  short TTL (`JWT_ACCESS_TTL`, default 15m). Verified by `requireAuth`
+  middleware (`apps/server/src/middleware/auth.ts`) reading
+  `Authorization: Bearer <token>`.
+- **Refresh token**: JWT, `{sub, jti}`, signed with a **different**
+  secret (`JWT_REFRESH_SECRET`), long TTL (default 30d). The DB
+  (`RefreshToken` table) stores only `sha256(token)` — never the raw
+  token — plus `expiresAt`/`revokedAt`, keyed by `jti` (the token's own
+  claim, used as the row's primary key). A DB leak alone can't be
+  replayed as a working session.
+- **Rotation + reuse detection**
+  (`apps/server/src/modules/auth/auth.service.ts`): every
+  `POST /auth/refresh` revokes the presented token and issues a brand new
+  pair. If an **already-revoked** (previously-rotated-away) token is
+  presented again, that's treated as a possible theft signal — every
+  refresh token for that user is immediately revoked, forcing a fresh
+  login everywhere. Verified by a real test
+  (`tests/auth.test.ts` "reuse of a rotated-away token revokes every
+  session for that user").
+- **Rate limiting**: `POST /auth/login` and `POST /auth/refresh` are
+  behind `authRateLimiter` (`apps/server/src/middleware/rateLimit.ts`) —
+  20 requests / 15 min per IP, then `429` with a clean JSON body.
+  Confirmed by manual testing (21 rapid logins → the 18th genuine 401s
+  become `429`s at request 18-21 in the actual run, exact cutoff depends
+  on the window).
+- **`GET /me`**, **`POST /auth/change-password`**: see section 3.10.
+- **Never exposes `passwordHash`**: every route that returns a `User`
+  goes through `toPublicUser()` (`apps/server/src/lib/serialize.ts`),
+  which strips it. Verified by a test asserting
+  `res.body.user).not.toHaveProperty("passwordHash")`.
+- **CORS**: `CLIENT_ORIGIN` is now a comma-separated list
+  (`apps/server/src/config/env.ts`'s `clientOrigins`), so desktop's Vite
+  dev server, Expo web, and a packaged app's custom origin can all be
+  allow-listed simultaneously. Requests with no `Origin` header (native
+  mobile fetch, curl, server-to-server) are always allowed — that's not a
+  CORS concern.
 
-## 9. Known issues / gotchas for the next session
+## 7. Authorization model
 
-### 9.1 Electron main process must compile to `.cjs`, not `.js`
+No permissions table — every check is either a role check
+(`requireRole`/`requireAdmin` middleware) or derived directly from the
+data ("is this user assigned to a visit on this case").
 
-`apps/desktop/package.json` has `"type": "module"` (needed for Vite/ESM in
-the renderer). If the Electron main/preload files are named `.ts` and
-compiled to `dist-electron/*.js`, Node treats that `.js` output as ESM
-(because it inherits `"type": "module"` from the nearest `package.json`)
-even though `tsconfig.electron.json` compiles to CommonJS syntax —
-crashes immediately with `ReferenceError: exports is not defined in ES
-module scope`. **Fix already applied**: the source files are
-`electron/main.cts` / `electron/preload.cts` (TypeScript's `.cts`
-extension), which forces `.cjs` output regardless of the package's `type`
-field. If you ever add more Electron main-process files, use `.cts` too,
-not `.ts`.
+**Two access-scoping helpers** (`apps/server/src/lib/authz.ts`):
 
-### 9.2 `pnpm --version` / `packageManager` field
+- `assertCaseAccess(caseId, requester)` — ADMIN always passes; WORKER
+  passes only if they're `assignedWorkerId` on **at least one visit** on
+  that case. Used by `GET /cases/:id`, `GET /cases/:id/timeline`, and the
+  "record treatment execution" `PATCH /cases/:id/treatments/:id` route.
+- `assertVisitAccess(visit.assignedWorkerId, requester)` — stricter:
+  ADMIN always passes; WORKER passes only if they are assigned to **that
+  specific visit**. Used by `GET /visits/:id`,
+  `POST /visits/:id/{start,complete,inspection,photos}`.
 
-See section 2 — if `pnpm install` fails with
-`ERR_PNPM_NO_MATCHING_VERSION` for the pinned version, update
-`packageManager` in root `package.json` to a version that actually
-resolves (`pnpm view pnpm versions` or just use the pnpm already on the
-machine) and retry.
+Note the asymmetry is deliberate: a worker assigned to *any* visit on a
+case can see the *whole* case (customer, property, full visit history —
+"see previous visits" from the brief) via `GET /cases/:id`, but can only
+act on (start/complete/photo/inspect) the specific visit they're assigned
+to, not a colleague's visit on the same case.
 
-### 9.3 `@types/react-dom` peer warning on install (harmless)
+**Admin-only routes** (`requireAdmin`, i.e. `requireRole("ADMIN")`):
+all of `/users`, `/customers`, `/landlords`, `/properties`; `POST/PATCH
+/treatments` (GET is open to any authenticated role — a worker needs to
+read instructions/safety info while performing a visit); `POST /cases`;
+`PATCH /cases/:id` (including the two lifecycle actions, resolve and
+cancel); `POST /visits` (schedule); `PATCH /visits/:id` (reschedule/
+reassign/cancel); `POST /cases/:id/treatments` and `DELETE
+/cases/:id/treatments/:id` (choosing/removing treatments). A worker
+attempting any of these gets a clean `403 FORBIDDEN`, never a 404 or 500
+— confirmed by `tests/authorization.test.ts`'s parameterized sweep.
 
-`pnpm install` prints `apps/mobile └─┬ @types/react-dom 18.3.7 └── ✕ unmet
-peer @types/react@^18.0.0: found 19.2.18`. This comes from a transitive
-dependency, not something we declared, and does not affect typecheck or
-build (`apps/mobile` typechecks clean). Safe to ignore; revisit only if it
-starts causing real type errors after an Expo SDK upgrade.
+**Worker-accessible routes**: `GET /cases` and `GET /visits` (list, but
+silently forced to their own `assignedWorkerId` regardless of what query
+params they send — they can never list someone else's cases/visits by
+guessing an id); `GET /cases/:id`, `GET /cases/:id/timeline`,
+`GET /visits/:id` (via the access helpers above); `POST /visits/:id/
+{start,complete,inspection,photos}`; `PATCH /cases/:id/treatments/:id`
+(record execution only — adding/removing stays admin); `GET /treatments`;
+`GET /me`, `POST /auth/change-password`.
 
-### 9.4 No linting configured yet
+## 8. Backend API
 
-Root `package.json` intentionally has no `lint` script — ESLint/Prettier
-were not set up this session (not in scope for "stabilize the foundation
-first"). Add ESLint (flat config, `@typescript-eslint`, a React plugin for
-desktop, an RN-aware config for mobile) as an early Next step; wire a root
-`lint` script once every package has one.
+All routes are mounted under `/api` (`apps/server/src/routes/index.ts`).
+Every list endpoint returns `{items, page, pageSize, total}`
+(`Paginated<T>`, `packages/shared/src/validation/common.ts`). Every error
+returns `{error: {message, code, details?}}` — `details` is present and
+field-keyed for Zod validation failures (400, `VALIDATION_ERROR`).
 
-### 9.5 Desktop root `tsconfig.json` sets `noEmit: false` but Vite doesn't use its output
+```
+Auth (public except change-password)
+  POST   /auth/login              rate-limited
+  POST   /auth/refresh            rate-limited, rotates + reuse-detects
+  POST   /auth/logout             idempotent even on an already-dead token
+  POST   /auth/change-password    requireAuth; revokes all other sessions
+  GET    /me                      requireAuth
 
-`tsc -b` in `apps/desktop`'s `build`/`typecheck` scripts does emit JS into
-`dist/`, but the actual renderer bundle comes from `vite build` (esbuild/
-rollup), which runs after `tsc -b` in the `build` script and wipes `dist/`
-first (`emptyOutDir: true`). This is harmless (tsc's emit here is purely
-so `noUncheckedIndexedAccess`/strict-mode errors surface — Vite alone
-doesn't typecheck) but slightly wasteful. Not worth changing now; if it
-ever gets confusing, switch `tsc -b`'s role in that script to pure
-typecheck (`--noEmit`) and drop the emit.
+Users (ADMIN only)
+  GET    /users            ?role=&active=&page=&pageSize=
+  POST   /users
+  GET    /users/:id
+  PATCH  /users/:id         guards against an admin locking themself out
 
-## 10. Next steps (recommended order for the next session)
+Customers / Landlords / Properties (ADMIN only)
+  GET    /customers | /landlords | /properties      ?search=&page=&pageSize=
+  POST   /customers | /landlords | /properties
+  GET    /customers/:id | /landlords/:id | /properties/:id
+  PATCH  /customers/:id | /landlords/:id | /properties/:id
 
-1. **Auth module** (server): `POST /api/auth/login`,
-   `/api/auth/refresh`, `/api/auth/logout`, `requireAuth`/`requireRole`
-   middleware (JWT in `Authorization: Bearer`, refresh token rotation via
-   the `RefreshToken` table). Wire mobile's `login.tsx` and add a desktop
-   login screen once this exists. Zod schemas already exist in
-   `packages/shared/src/validation/auth.ts`.
-2. **Customers / Landlords / Properties CRUD** (server routes + services) —
-   needed before Cases can be created for real.
-3. **Cases module**: `POST /api/cases` implementing the manual intake
-   workflow (`createCaseSchema` already models customer+property+landlord
-   +problem+optional initial visit in one call), `GET /api/cases` (list,
-   filterable by status per `caseListQuerySchema`), `GET /api/cases/:id`
-   (returns `CaseWithRelations`), `PATCH /api/cases/:id`. Wire desktop's
-   `CasesPage` and a real case-detail screen (the brief wants a visible
-   timeline: request → consultation → inspection → treatment(s) →
-   follow-up → resolution — build it from the case's `visits` array,
-   ordered).
-4. **Visits module**: schedule/start/complete visit endpoints
-   (`scheduleVisitSchema`/`startVisitSchema`/`completeVisitSchema` already
-   exist), assignment to a worker. This is what the mobile Today/Upcoming
-   screens and `visit/[id].tsx` need real data from.
-5. **Treatments module**: catalog CRUD + `POST
-   /api/cases/:id/treatments` to attach one (schemas exist).
-6. **Photo upload**: build the storage abstraction described in section 5,
-   then a multipart upload endpoint using `uploadPhotoMetaSchema`, then
-   wire mobile's "take photo" action (`expo-image-picker` is already a
-   dependency and camera permission is already declared in `app.json`).
-7. **Wire Socket.IO events** for real: emit `case:created`/`case:updated`/
-   `visit:created`/`visit:updated` from the routes above (helpers to add
-   in `src/realtime/socket.ts`); have desktop join the `cases` room on
-   dashboard mount and case rooms on case-detail mount; make the mobile
-   Today screen react to `visit:updated` for its own assigned visits.
-8. **Dashboard real data**: replace `DashboardPage`'s `—` counts with real
-   queries once the Cases/Visits APIs exist.
-9. **ESLint/Prettier** — see 9.4.
-10. Eventually: S3/R2 storage driver, email ingestion (the domain is
-    already shaped to allow this — nothing today assumes manual intake is
-    the only path in), calendar view, desktop packaging
-    (electron-builder) for distributable installers.
+Treatments (GET: any authenticated role; POST/PATCH: ADMIN)
+  GET    /treatments        ?active=&search=&page=&pageSize=
+  POST   /treatments
+  GET    /treatments/:id
+  PATCH  /treatments/:id
 
-## 11. Commands reference
+Cases
+  GET    /cases                      ?status=&assignedWorkerId=&search=&page=&pageSize=
+                                      (worker: assignedWorkerId forced to self)
+  POST   /cases                      ADMIN only — manual intake, see 3.8
+  GET    /cases/:id                  full detail incl. activities — see authz
+  PATCH  /cases/:id                  ADMIN only — edits + resolve/cancel/reopen
+  GET    /cases/:id/timeline         ordered CaseActivity[]
+
+  POST   /cases/:id/treatments                 ADMIN only — choose a treatment
+  PATCH  /cases/:id/treatments/:caseTreatmentId ADMIN or assigned worker — record execution
+  DELETE /cases/:id/treatments/:caseTreatmentId ADMIN only
+
+Visits
+  GET    /visits             ?caseId=&assignedWorkerId=&status=&type=&from=&to=&page=&pageSize=
+                              (worker: assignedWorkerId forced to self;
+                               from/to power mobile's Today/Upcoming)
+  POST   /visits              ADMIN only — schedule, optional assignedWorkerId
+  GET    /visits/:id          ADMIN or the assigned worker
+  PATCH  /visits/:id          ADMIN only — reschedule/reassign/cancel/notes
+  POST   /visits/:id/start                 assigned worker (or ADMIN)
+  POST   /visits/:id/complete              assigned worker (or ADMIN) — optional inline inspection
+  POST   /visits/:id/inspection            assigned worker (or ADMIN) — record/update inspection standalone
+  POST   /visits/:id/photos                assigned worker (or ADMIN) — metadata only, see section 5
+
+Health
+  GET    /health              public, checks real DB connectivity
+```
+
+## 9. Case status state machine + timeline
+
+`apps/server/src/modules/cases/case-status.ts`:
+
+- `recalculateCaseStatus(tx, caseId, actorId?)` — called after **every**
+  visit create/schedule/start/complete/reschedule/cancel, inside the same
+  transaction as that mutation. No-ops if the case is already RESOLVED or
+  CANCELLED (terminal). Otherwise derives the bucket from the case's
+  current visits:
+  - no visits at all → `NEW`
+  - has a `SCHEDULED`/`IN_PROGRESS` visit, none `COMPLETED` yet →
+    `SCHEDULED`
+  - has at least one `COMPLETED` visit → `IN_PROGRESS`
+
+  If the derived value differs from the stored one, updates it and logs a
+  `STATUS_CHANGED` activity with `metadata: {from, to, reason: "auto"}`.
+  This is what makes an arbitrary number of inspection → treatment →
+  follow-up loops "just work" without new enum values.
+
+- `applyExplicitStatus(tx, caseId, status, actorId)` — the two admin-only
+  lifecycle actions (resolve/cancel), plus reopening. Sets/clears
+  `resolvedAt`, logs `CASE_RESOLVED`/`CASE_CANCELLED`/`STATUS_CHANGED`
+  with `reason: "manual"`.
+
+`PATCH /cases/:id` with a `status` field calls `applyExplicitStatus`;
+every other status change in the system is automatic via
+`recalculateCaseStatus`. A route handler never does `case.status = X`
+directly outside these two functions.
+
+Verified end-to-end by `tests/workflow.test.ts`, which drives a case
+through NEW → SCHEDULED → IN_PROGRESS → SCHEDULED (2nd visit) →
+IN_PROGRESS → RESOLVED, confirming the loop doesn't get stuck and that a
+RESOLVED case rejects a new visit (`POST /visits` → 400).
+
+## 10. What's built (session 2 — this session)
+
+### packages/shared additions
+- `CaseActivityType` enum (15 values) + `CASE_ACTIVITY_TYPE_LABELS`.
+- `CaseActivity` type, `CaseWithRelations.activities`, `.visits[].
+  assignedWorker/inspection`.
+- `createCaseSchema` rewritten for existing-or-new customer/property (3.8).
+- New/changed validation: `visitListQuerySchema`, `caseListQuerySchema`
+  (now paginated), `peopleListQuerySchema`, `userListQuerySchema`,
+  `treatmentListQuerySchema`, `createCustomerSchema`/`createLandlordSchema`/
+  `createPropertySchema` (previously only `update*` existed),
+  `recordInspectionSchema` (replaces the old `createInspectionSchema`),
+  `addVisitPhotoSchema` (replaces `uploadPhotoMetaSchema`).
+- `booleanQueryParam` in `validation/common.ts` — fixes a real bug: `z.
+  coerce.boolean()` makes `?active=false` mean `true` (`Boolean("false")
+  === true` in JS). Used by `active=` filters on `/users` and
+  `/treatments`.
+- `cuidSchema` loosened — see 3.6.
+
+### apps/server additions
+- `prisma/schema.prisma`: `CaseActivity` model + `CaseActivityType` enum,
+  `User.caseActivities` relation. Two migrations this session:
+  `20260911113701_add_case_activity` (only schema change needed —
+  everything else uses the session-1 tables as-is).
+- `prisma/seed.ts`: now also seeds a WORKER login
+  (`worker@msph.local`/`ChangeMe123!`) and one sample case
+  (`seed-case-1`) with a scheduled initial inspection assigned to that
+  worker, plus fixed treatment ids.
+- `src/lib/`: `password.ts` (Argon2), `jwt.ts` (sign/verify access +
+  refresh, `hashToken`), `serialize.ts` (`toPublicUser`),
+  `pagination.ts` (`paginationArgs`/`toPaginated`), `authz.ts` (section
+  7), `assertExists.ts` (FK-lookup-before-write helper — turns a bad
+  foreign id into a clean 400 instead of a raw Postgres FK-violation
+  500).
+- `src/middleware/auth.ts` (`requireAuth`, `requireRole`, `requireAdmin`),
+  `src/middleware/rateLimit.ts` (`authRateLimiter`). `validate.ts`
+  extended with `body<T>(req)`/`query<T>(req)` typed accessors (every
+  route reads the Zod-validated body/query through these instead of
+  inline casts).
+- `src/modules/`: `auth/` (service + routes + `me.routes.ts`), `users/`,
+  `customers/`, `landlords/`, `properties/`, `treatments/`, `cases/`
+  (`cases.service.ts`, `case-treatments.service.ts`, `case-status.ts`,
+  `case-activity.ts`, `cases.routes.ts`), `visits/`
+  (`visits.service.ts`, `visits.routes.ts`). Every module follows the
+  same routes-call-service, service-owns-Prisma-and-transactions
+  pattern.
+- `src/realtime/socket.ts`: real emit helpers, see section 4.
+- `src/app.ts`: multi-origin CORS (section 6), morgan silenced under
+  `NODE_ENV=test`.
+- **Tests**: `vitest.config.ts` (env injected via `test.env`, see
+  "Testing" below), `tests/setup.ts` (truncate-all-tables
+  `beforeEach`), `tests/helpers.ts` (fixture factories:
+  `createAdmin`/`createWorker`/`createCustomerFixture`/etc.,
+  `authHeader`), and 5 test files — `auth.test.ts`,
+  `authorization.test.ts`, `cases.test.ts`, `visits.test.ts`,
+  `workflow.test.ts` — 36 tests total, all passing.
+- `tsconfig.test.json` — separate typecheck pass covering `src` + `tests`
+  together (main `tsconfig.json`'s `rootDir: "src"` can't include tests).
+
+## 11. Testing
+
+**Framework**: vitest + supertest, real Postgres (a dedicated `msph_test`
+database — never `msph_dev`), no Prisma mocking. Tests go through the
+actual Express app (`createApp()`) and actual service/Prisma/DB stack —
+this is what actually proves the authorization and workflow logic works,
+not a mock's approximation of it.
+
+**One-time setup** (already done in this dev container, needed again on a
+fresh machine):
+```bash
+psql -c "CREATE DATABASE msph_test OWNER msph;"
+DATABASE_URL="postgresql://msph:msph_dev_password@localhost:5432/msph_test?schema=public" \
+  pnpm --filter @msph/server exec prisma migrate deploy
+```
+
+**Running**: `pnpm --filter @msph/server test` (or `test:watch`). Env vars
+(`DATABASE_URL` pointed at `msph_test`, JWT secrets, etc.) are injected by
+`vitest.config.ts`'s `test.env` — set before any module evaluates, so
+`src/config/env.ts`'s own `dotenv/config` load of `apps/server/.env`
+never overrides them (dotenv doesn't clobber already-set vars). No
+`.env.test` file needed.
+
+**Isolation**: `tests/setup.ts`'s `beforeEach` truncates every app table
+(children-first FK order, one transaction) — each test starts from an
+empty database and never depends on another test's leftover state.
+`fileParallelism: false` in the vitest config because all test files
+share one database.
+
+**Coverage** (36 tests / 5 files, all passing):
+- `auth.test.ts` — login success/failure/inactive-user/malformed-body,
+  refresh rotation + reuse-detection (2 tests), `GET /me` auth
+  requirement + garbage-token rejection.
+- `authorization.test.ts` — parameterized sweep of 9 admin-only routes
+  asserting a worker gets 403 on each, admin gets through on a sample,
+  no-token gets 401, worker CAN read `/treatments`.
+- `cases.test.ts` — create with new customer+property, create with
+  existing ids, create-with-initial-visit (status → SCHEDULED),
+  validation (neither/both customer forms), admin-only enforcement.
+- `visits.test.ts` — schedule → status auto-transition, worker can't
+  schedule, full access-scoping matrix (no access / assigned / a
+  *different* worker still denied / can't start someone else's visit),
+  start → complete → inspection recorded → case IN_PROGRESS →
+  timeline has the right event types in it.
+- `workflow.test.ts` — the brief's full "Done criteria" walkthrough as
+  one test: intake → schedule → assign → inspect → treatment chosen →
+  treatment performed → follow-up visit (2nd loop through
+  SCHEDULED/IN_PROGRESS) → worker blocked from resolving → admin resolves
+  → resolution is terminal (new visit rejected) → timeline has every
+  expected event type in the right order.
+
+**Not covered by automated tests** (verified manually instead, via a full
+curl walkthrough during this session — see git history / this section's
+predecessor in the conversation, not reproduced as a script): Socket.IO
+emits (no test client wired up), rate-limiter's exact request-count
+threshold (confirmed manually: 21 rapid bad logins → requests 18-21
+returned 429), CORS origin rejection.
+
+## 12. Current status — verified working end-to-end (session 2)
+
+Everything from session 1's "Current status" still holds (server ↔
+Postgres, desktop Electron launch under Xvfb, mobile Metro bundler) and
+was spot-checked again this session. New this session:
+
+- `pnpm -r typecheck` from repo root — all 4 packages (shared, server,
+  desktop, mobile) clean, including `apps/server/tsconfig.test.json`
+  (tests typecheck too, not just `src`).
+- `pnpm --filter @msph/server test` — 36/36 passing.
+- Full manual curl walkthrough of the brief's exact "Done criteria" list
+  against a running dev server (start Postgres → migrate → seed → start
+  server → login as admin → login as worker → worker denied `/users`
+  (403) → create case → schedule visit assigned to worker → case status
+  NEW→SCHEDULED confirmed → worker denied case access before assignment
+  (403) → worker granted after assignment (200) → worker starts visit →
+  worker completes visit with inspection fields → case status
+  SCHEDULED→IN_PROGRESS confirmed → admin adds treatment → worker records
+  it performed → worker adds photo metadata → worker denied adding a
+  treatment (403, admin-only) → full timeline fetched and read back in
+  order → worker denied resolving (403) → admin resolves → resolved case
+  rejects a new visit (400) → refresh-token rotation + reuse-detection
+  both confirmed live → rate limiter confirmed live (429 after 20
+  attempts in 15 min)). This is the same walkthrough the automated tests
+  now cover, run once by hand first to catch what tests alone might miss
+  (real HTTP headers, real timing, the cuid-validation bug in 3.6 was
+  actually found this way, before tests were even written).
+- Dev database (`msph_dev`) reset and reseeded clean at the end of the
+  session — contains exactly the seed script's fixtures, no leftover
+  manual-testing cruft.
+- All background processes (dev server, etc.) stopped after verification.
+
+**Still not done**: desktop/mobile don't call any of this API yet beyond
+the session-1 health check. No storage driver (photos are metadata-only).
+No ESLint. See Next steps.
+
+## 13. Known issues / gotchas
+
+Session 1's gotchas (9.1–9.5 in the previous revision of this file) still
+apply unchanged — Electron `.cts`→`.cjs` requirement, the `packageManager`
+pin, the harmless `@types/react-dom` peer warning, no ESLint yet, desktop's
+redundant `tsc -b` emit. Not repeated here in full; read the git history
+of this file (or just trust that the fixes described there are still in
+place — nothing this session touched apps/desktop or apps/mobile).
+
+**New this session:**
+
+- **`z.coerce.boolean()` is a trap for query params** — fixed via
+  `booleanQueryParam` in shared validation (section 10). If you ever add
+  another boolean query filter, use that, not `z.coerce.boolean()`.
+- **Service-layer return types are NOT annotated with the shared "wire"
+  entity types** (`Customer`, `User`, `Treatment`, etc.) — those types
+  describe the post-`JSON.stringify()` shape (ISO date strings); Prisma
+  returns real `Date` objects. Annotating e.g. `getCustomer(id):
+  Promise<Customer>` is a type lie that `tsc` correctly rejects (hit and
+  fixed this exact error across 6 files this session). Service functions
+  are left to infer Prisma's actual return shape; `res.json()` performs
+  the real Date→string conversion at the actual API boundary, where the
+  shared type's contract genuinely applies. See the comment atop
+  `customers.service.ts` for the canonical explanation, referenced from
+  the other service files.
+- **`tsc -b`'s `rootDir: "src"` can't also typecheck `tests/`** — solved
+  with a separate `tsconfig.test.json` (`include: ["src", "tests"]`,
+  `noEmit: true`, no `rootDir`/`outDir`) run as a second step in the
+  `typecheck` script.
+- **`tsx watch` watches across the workspace symlink into
+  `packages/shared/dist`**, which is neat (edit shared, server hot
+  -reloads) but means rebuilding shared while the dev server is running
+  can race: `rm -rf dist && tsc -b` triggers tsx's restart on the
+  `unlink` the instant `dist/index.js` disappears, before `tsc` finishes
+  recreating it, crashing with `ERR_MODULE_NOT_FOUND`. Not a bug in the
+  app — just kill the dev server before rebuilding shared, then start it
+  fresh, rather than expecting the watcher to survive the rebuild.
+- **Prisma's `Json?` field type (`Prisma.InputJsonValue`) does not
+  include `null`** the way you'd expect (`null` needs the separate
+  `Prisma.JsonNull` sentinel) — `CaseActivity.metadata`'s type is
+  `Record<string, Prisma.InputJsonValue>`, so a call site that might
+  otherwise pass `workerId: string | null` conditionally spreads the key
+  in instead (`...(x ? {workerId: x} : {})`) rather than ever assigning
+  `null` into it. See `visits.service.ts`'s `updateVisit`.
+
+## 14. Next steps (recommended order for the next session)
+
+1. **Wire the desktop UI to the real API.** `CasesPage`, a real case
+   detail screen (timeline from `GET /cases/:id/timeline` + the brief's
+   visual request→consultation→inspection→treatment→follow-up→resolution
+   flow, built from the ordered `visits`/`activities` arrays — the data
+   for this now fully exists), `CustomersPage`, `PropertiesPage`,
+   `LandlordsPage`, `WorkersPage`, `TreatmentsPage`, a real login screen
+   (JWT storage — likely `localStorage` or Electron's `safeStorage` via a
+   preload-exposed API, access-token refresh-on-401 interceptor around
+   `lib/api.ts`). `DashboardPage`'s bucket counts can finally be wired to
+   `GET /cases?status=X`.
+2. **Wire the mobile UI to the real API.** Real login (`app/login.tsx`
+   currently a no-op stub), Today/Upcoming screens from
+   `GET /visits?assignedWorkerId=me&from=...&to=...` (note: workers'
+   `assignedWorkerId` is forced server-side, so the client doesn't even
+   need to pass its own id — any value works, but passing the real one is
+   clearer), visit detail screen wired to start/complete/inspection/
+   photos, JWT storage via `expo-secure-store` (not installed yet —
+   `AsyncStorage`/`localStorage` are not appropriate for refresh tokens
+   on a phone).
+3. **Wire Socket.IO on the client side** — join `cases` room on
+   dashboard mount, `case:${id}` room on case-detail mount (desktop);
+   consider whether mobile needs it at all yet (Today screen could just
+   poll, given field connectivity is often spotty — reconnect-heavy
+   Socket.IO on cellular may be more trouble than it's worth for v1;
+   decide when building it, don't assume).
+4. **Storage driver** (section 5): build
+   `apps/server/src/storage/index.ts` (a `StorageDriver` interface —
+   `put`, `getUrl`, maybe `delete`) + `LocalStorageDriver`, then a real
+   binary upload endpoint (multipart, `multer` or Busboy) that returns a
+   `storageKey` for `POST /visits/:id/photos` to consume. Wire mobile's
+   camera capture (`expo-image-picker` is already a dependency, Android
+   `CAMERA` permission already declared in `app.json`).
+5. **ESLint/Prettier** (carried over from session 1, still not done).
+6. Eventually: S3/R2 storage driver, email ingestion, calendar view,
+   Electron packaging (`electron-builder`) for distributable installers,
+   an `OWNER` role tier if the business ever needs one (see 3.2).
+
+## 15. Commands reference
 
 ```bash
 # Install everything (run from repo root)
 pnpm install
 
-# First-time DB setup (run from apps/server, or use --filter from root)
+# First-time DB setup
 pnpm --filter @msph/server prisma:migrate
 pnpm --filter @msph/server prisma:seed
+
+# Test DB (one-time, separate from the dev DB)
+psql -c "CREATE DATABASE msph_test OWNER msph;"
+DATABASE_URL="postgresql://msph:msph_dev_password@localhost:5432/msph_test?schema=public" \
+  pnpm --filter @msph/server exec prisma migrate deploy
 
 # Dev servers
 pnpm dev:server      # http://localhost:4000, health at /api/health
@@ -427,17 +647,24 @@ pnpm dev:mobile      # Expo — scan QR or press w/a/i in the terminal
 
 # Checks
 pnpm typecheck                                   # every package
+pnpm --filter @msph/server test                  # backend test suite
 pnpm --filter @msph/server prisma:studio         # DB browser GUI
 pnpm --filter @msph/desktop build                # production build check
 pnpm --filter @msph/mobile exec expo export --platform web   # bundle check
 
-# Local Postgres in THIS dev container (already created, see section 8)
+# Local Postgres in THIS dev container (already created)
 service postgresql start
-# role: msph / msph_dev_password, db: msph_dev
+# role: msph / msph_dev_password, dbs: msph_dev, msph_test
+
+# Default logins (seeded)
+# admin@msph.local / ChangeMe123!  (ADMIN)
+# worker@msph.local / ChangeMe123! (WORKER)
 ```
 
-## 12. Environment variables
+## 16. Environment variables
 
 See `.env.example` at repo root for the full documented list — copy it to
 `apps/server/.env` and fill in real values. Never commit `.env` files
-(already gitignored) or hardcode secrets in code.
+(already gitignored) or hardcode secrets in code. Test env vars are
+injected directly by `vitest.config.ts`, not read from a file — see
+section 11.

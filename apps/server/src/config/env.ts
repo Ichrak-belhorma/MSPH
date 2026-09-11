@@ -8,6 +8,10 @@ import { z } from "zod";
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
+  /** Comma-separated list — the desktop Vite dev server, Expo web, a
+   * packaged Electron app's custom scheme, etc. can all be different
+   * origins in dev. Native mobile fetch calls don't send an Origin header
+   * at all and are unaffected by this (see app.ts). */
   CLIENT_ORIGIN: z.string().default("http://localhost:5173"),
 
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
@@ -36,3 +40,8 @@ function loadEnv() {
 
 export const env = loadEnv();
 export const isProduction = env.NODE_ENV === "production";
+
+/** `CLIENT_ORIGIN` split into a list — see the schema comment above. */
+export const clientOrigins: string[] = env.CLIENT_ORIGIN.split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);

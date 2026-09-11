@@ -37,7 +37,12 @@ cp .env.example apps/server/.env
 # edit apps/server/.env — DATABASE_URL, JWT secrets, etc.
 
 pnpm --filter @msph/server prisma:migrate   # creates the database schema
-pnpm --filter @msph/server prisma:seed      # optional: admin user + starter treatments
+pnpm --filter @msph/server prisma:seed      # admin + worker logins, sample treatments/case
+
+# Tests run against a separate database — create it once:
+createdb -O msph msph_test   # or: psql -c "CREATE DATABASE msph_test OWNER msph;"
+DATABASE_URL="postgresql://msph:msph_dev_password@localhost:5432/msph_test?schema=public" \
+  pnpm --filter @msph/server exec prisma migrate deploy
 ```
 
 ## Running things
@@ -55,15 +60,22 @@ Expo's own terminal UI doesn't play well multiplexed with the others.
 
 ```bash
 pnpm typecheck                              # typecheck every package
+pnpm --filter @msph/server test             # backend test suite (vitest + supertest)
 pnpm --filter @msph/server prisma:studio    # browse the database
 pnpm build                                  # build shared + server for production
 ```
 
-## Default dev login
+## Default dev logins
 
-Seeded by `prisma:seed` (see `apps/server/prisma/seed.ts`):
+Seeded by `prisma:seed` (see `apps/server/prisma/seed.ts`), password
+`ChangeMe123!` for both:
 
-- email: `admin@msph.local`
-- password: `ChangeMe123!`
+- `admin@msph.local` — ADMIN
+- `worker@msph.local` — WORKER
 
-Login isn't wired up in the UI yet — see CONTEXT.md "Next steps".
+The backend's full REST API (auth, users, customers, landlords,
+properties, cases, visits, inspections, treatments, photo metadata) is
+implemented and tested — see CONTEXT.md "Backend API" for the endpoint
+list and "Domain decisions" for the authorization model. The desktop/
+mobile UIs don't call it yet (still placeholder screens) — see
+CONTEXT.md "Next steps".
