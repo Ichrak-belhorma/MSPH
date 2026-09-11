@@ -243,6 +243,19 @@ export async function completeVisit(id: string, input: CompleteVisitInput, reque
     assertVisitAccess(visit.assignedWorkerId, requester);
     if (visit.status === "CANCELLED") throw ApiError.badRequest("Cannot complete a cancelled visit");
 
+    if (visit.status === "COMPLETED") {
+      // Idempotent no-op: a retried "complete" call (a dropped response on
+      // a flaky connection, or a duplicate tap that raced the button's
+      // loading state — see CONTEXT.md session 6, "duplicate submission" /
+      // "visit completed twice") after the server already committed the
+      // first completion should look like success to the caller, not
+      // silently re-run the whole workflow — overwriting `completedAt`
+      // with "now" and duplicating VISIT_COMPLETED/INSPECTION_RECORDED
+      // timeline entries every retry. Nothing changed, so nothing to
+      // write, log, or recalculate.
+      return;
+    }
+
     const completedAt = input.completedAt ? new Date(input.completedAt) : new Date();
     await tx.visit.update({
       where: { id },

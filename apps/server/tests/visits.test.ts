@@ -147,4 +147,95 @@ describe("scheduling and performing a visit", () => {
       expect.arrayContaining(["VISIT_SCHEDULED", "WORKER_ASSIGNED", "VISIT_STARTED", "VISIT_COMPLETED", "INSPECTION_RECORDED"]),
     );
   });
+
+  describe("failure paths", () => {
+    it("completing an already-completed visit twice is a safe no-op, not a duplicated timeline/completedAt overwrite", async () => {
+      // Reproduces "duplicate submission" / "visit completed twice" from
+      // the brief: a dropped response on a flaky connection, or a
+      // double-tap, causes the same POST /complete to land server-side
+      // twice.
+      const admin = await createAdmin();
+      const worker = await createWorker();
+      const { case: kase } = await createCaseFixture();
+
+      const scheduled = await request(app)
+        .post("/api/visits")
+        .set(...authHeader(admin.accessToken))
+        .send({
+          caseId: kase.id,
+          type: "INITIAL_INSPECTION",
+          scheduledAt: new Date(Date.now() + 3600_000).toISOString(),
+          assignedWorkerId: worker.dbUser.id,
+        });
+      const visitId = scheduled.body.id;
+
+      await request(app).post(`/api/visits/${visitId}/start`).set(...authHeader(worker.accessToken)).send({});
+
+      const first = await request(app)
+        .post(`/api/visits/${visitId}/complete`)
+        .set(...authHeader(worker.accessToken))
+        .send({ observations: "First pass" });
+      expect(first.status).toBe(200);
+      const firstCompletedAt = first.body.completedAt;
+
+      // Retry — the worker's client never saw the first response.
+      const second = await request(app)
+        .post(`/api/visits/${visitId}/complete`)
+        .set(...authHeader(worker.accessToken))
+        .send({ observations: "Second pass, should be ignored" });
+      expect(second.status).toBe(200);
+      expect(second.body.status).toBe("COMPLETED");
+      // completedAt must not have been bumped to "now" on the retry.
+      expect(second.body.completedAt).toBe(firstCompletedAt);
+      // The original observations must not have been overwritten.
+      expect(second.body.inspection.observations).toBe("First pass");
+
+      const timeline = await request(app)
+        .get(`/api/cases/${kase.id}/timeline`)
+        .set(...authHeader(admin.accessToken));
+      const completedCount = timeline.body.filter((a: { type: string }) => a.type === "VISIT_COMPLETED").length;
+      expect(completedCount).toBe(1);
+    });
+
+    it("cannot schedule a visit on a resolved case", async () => {
+      const admin = await createAdmin();
+      const { case: kase } = await createCaseFixture();
+
+      const resolve = await request(app)
+        .patch(`/api/cases/${kase.id}`)
+        .set(...authHeader(admin.accessToken))
+        .send({ status: "RESOLVED" });
+      expect(resolve.status).toBe(200);
+
+      const res = await request(app)
+        .post("/api/visits")
+        .set(...authHeader(admin.accessToken))
+        .send({ caseId: kase.id, type: "FOLLOW_UP", scheduledAt: new Date(Date.now() + 3600_000).toISOString() });
+      expect(res.status).toBe(400);
+    });
+
+    it("a well-formed but non-existent case id 404s instead of 500ing", async () => {
+      const admin = await createAdmin();
+      const res = await request(app)
+        .get("/api/cases/clxxxxxxxxxxxxxxxxxxxxxxxx")
+        .set(...authHeader(admin.accessToken));
+      expect(res.status).toBe(404);
+    });
+
+    it("a non-cuid-shaped but non-empty case id still 404s cleanly, not 500s (cuidSchema is deliberately permissive — see its doc comment)", async () => {
+      const admin = await createAdmin();
+      const res = await request(app)
+        .get("/api/cases/not-a-cuid")
+        .set(...authHeader(admin.accessToken));
+      expect(res.status).toBe(404);
+    });
+
+    it("an empty case id segment 400s (validation)", async () => {
+      const admin = await createAdmin();
+      const res = await request(app)
+        .get("/api/cases/%20")
+        .set(...authHeader(admin.accessToken));
+      expect(res.status).toBe(400);
+    });
+  });
 });

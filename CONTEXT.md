@@ -4,12 +4,22 @@
 persistent memory of the project. Do not redo completed work — check
 "Current status" and "Next steps" first and continue from there.
 
-Last updated: 2026-09-11 (session 5 — cross-client synchronization: a
+Last updated: 2026-09-11 (session 6 — production-readiness audit: a
+19-dimension review of auth, authorization, validation, DB integrity,
+photo upload, realtime, both clients' UX, security, logging, env config,
+tests, TypeScript, accessibility and performance, focused on the
+explicit brief of failure-path reliability rather than new features.
+Found and fixed one real bug — `completeVisit` had no guard against
+re-completing an already-completed visit, unlike `startVisit`'s
+equivalent guard — with a regression test; added failure-path tests for
+scheduling on a resolved case and non-existent/malformed case ids;
+rewrote README.md into a real onboarding doc. See §20 for the full
+findings). Previous: session 5 — cross-client synchronization: a
 granular Socket.IO event taxonomy replacing the old 4-event "everything
 changed" design, threaded through the desktop and mobile realtime
 providers, a new committed server-side realtime test suite, and a
 13-step live desktop+mobile Playwright verification of the full
-manager+worker scenario). Previous: session 4 — mobile application: full
+manager+worker scenario). Session 4 — mobile application: full
 French worker app wired to the real API, real photo upload + storage
 driver, realtime, offline-safe drafts. Session 3 — desktop application:
 full French UI wired to the real API, realtime, Electron security.
@@ -573,7 +583,7 @@ still-relevant condensed points:
 - Backend tests: `pnpm --filter @msph/server test` — 36 tests, still
   passing (re-ran this session after the socket fix).
 - Test DB is separate from dev DB (`msph_test` vs `msph_dev`) — see
-  section 21 "Commands reference" below for setup.
+  section 22 "Commands reference" below for setup.
 - No ESLint/Prettier anywhere in the repo yet (carried over, still not
   done — see Next steps).
 
@@ -1339,7 +1349,139 @@ recorded here so a future session doesn't waste time re-diagnosing them:
   understood as a testing gotcha, not confirmed harmless or harmful on a
   real device — worth a real-device pass to check.
 
-## 20. Next steps (recommended order for the next session)
+## 20. Production-readiness audit (session 6)
+
+Scope: not a feature session. The brief was explicit — audit the existing
+system across 19 dimensions (auth, authz, API validation, DB integrity,
+error handling, photo upload reliability, realtime sync, desktop UX,
+mobile UX, loading/empty states, network failures, security, logging, env
+config, tests, TypeScript quality, accessibility, performance) and fix
+real reliability bugs, especially on failure paths that had never been
+exercised in sessions 1-5 (every prior E2E verification tested the happy
+path only). No decorative UI changes, no new features.
+
+**20.1 Method.** Read every backend auth/authz/error-handling/validation
+module, the Prisma schema, the photo upload pipeline (route → service →
+`StorageDriver`), both clients' API-client layers (401/refresh handling,
+network-vs-server-error distinction), both clients' realtime providers,
+and a representative sample of desktop/mobile screens for
+loading/empty/error-state coverage. Cross-checked each of the brief's nine
+example failure scenarios against the actual code path, not just against
+what earlier sessions' CONTEXT.md entries claimed was handled.
+
+**20.2 Finding: `completeVisit` had no re-completion guard (real bug,
+fixed).** `startVisit` (`apps/server/src/modules/visits/visits.service.ts`)
+already rejected starting a visit that was `COMPLETED` or `CANCELLED`.
+`completeVisit` only rejected `CANCELLED` — a visit already `COMPLETED`
+could be "completed" again without error. Concretely this is the brief's
+own "duplicate submission" and "visit completed twice" scenarios: a
+dropped response on a flaky connection (mobile's `NetworkError` vs.
+`ApiRequestError` distinction exists precisely because this happens) or a
+double-tap that raced the button's `loading`-disabled state would silently
+re-run the whole completion — overwriting `completedAt` with a new
+timestamp, duplicating `VISIT_COMPLETED` and `INSPECTION_RECORDED`
+`CaseActivity` rows in the case timeline every retry, and re-broadcasting
+Socket.IO events. Fixed by making a re-completion an idempotent no-op: if
+`visit.status === "COMPLETED"` already, `completeVisit` returns without
+writing, logging, or recalculating anything — the retry looks like success
+to the caller (same visit, same `completedAt`, same inspection data) with
+no side effects. Covered by a new regression test in
+`apps/server/tests/visits.test.ts` ("completing an already-completed visit
+twice is a safe no-op...") that asserts `completedAt` and the inspection
+observations from the *first* call survive a second call, and that the
+timeline has exactly one `VISIT_COMPLETED` entry, not two.
+
+**20.3 Everything else audited and found already correct** — no change
+needed, listed here so the next session doesn't re-audit it from scratch:
+
+- **Auth**: access/refresh JWT split, refresh rotation-on-use with
+  reuse-detection (a replayed, already-rotated token revokes every
+  session for that user, not just itself), password change also revokes
+  every other session, same generic error for "no such user" and "wrong
+  password" (no user enumeration), rate-limited login/refresh. Both
+  clients de-dupe concurrent 401-triggered refreshes (one in-flight
+  `/auth/refresh` call, not N), and distinguish a dead session
+  (`SessionExpiredError` → route guard sends the user back to login) from
+  a dropped connection (`NetworkError` — mobile only; desktop doesn't
+  need it, it isn't used on a flaky network the way a phone is) so a
+  worker who loses signal mid-visit never gets logged out over it.
+- **Authorization**: `assertCaseAccess`/`assertVisitAccess`
+  (`apps/server/src/lib/authz.ts`) correctly scope a worker to cases/
+  visits they're assigned to (403, not a leaked 404, confirmed by
+  `apps/server/tests/visits.test.ts`'s "case/visit access scoping"
+  block) — including on the treatment-execution route, which is worker-
+  reachable but must still be scoped to their own case. Admin-only
+  routes (`requireAdmin`) return 403 before validation ever runs for a
+  worker, verified by `authorization.test.ts`.
+- **Validation**: every mutating route has a Zod schema; `cuidSchema` is
+  deliberately permissive (any non-empty, non-absurd-length string, not a
+  strict CUID regex) so a malformed-but-non-empty id reaches Prisma and
+  404s like any other unknown id, rather than a validation 400 — a
+  documented, deliberate choice (see the schema's own doc comment), not a
+  gap. An empty/whitespace id still 400s. Confirmed with new tests.
+- **DB integrity**: every multi-step write is a `prisma.$transaction`;
+  FKs have sensible `onDelete` (cascade for a case's own children, `SetNull`
+  for a photo losing its visit reference); indexes cover every filtered/
+  joined column actually queried (`status`, `assignedWorkerId`,
+  `scheduledAt`, `caseId`, ...).
+- **Photo upload reliability**: the real upload endpoint
+  (`POST /visits/:id/photos/upload`) checks `assertVisitAccess` and 15MB/
+  image-only limits *before* writing anything, writes the file to
+  `StorageDriver` *before* opening the DB transaction (a failed disk write
+  never leaves an orphaned `Photo` row pointing at nothing), and
+  multer/upload errors map to 400 (`UPLOAD_ERROR`), never a 500. Mobile's
+  `uploadVisitPhoto` retries once through a 401 with a freshly refreshed
+  token (native `UploadTask` bypasses the API client's own fetch-based
+  401-retry, so this is handled separately, deliberately, in
+  `lib/photoUpload.ts`). A failed/pending photo is never silently
+  dropped — it's kept in the local draft (`lib/draftStore.ts`) with
+  status `failed`/`pending`, shown to the worker, and completing the
+  visit with pending photos requires an explicit "Terminer quand même"
+  confirmation rather than either blocking completion or discarding them.
+- **Realtime**: every mutation emits the correct specific event (verified
+  by the committed `realtime.test.ts`, unchanged this session); both
+  clients treat every event as "refetch", never as data — a payload can't
+  desync the UI even though Socket.IO itself is still unauthenticated
+  (see 4.7/20.4 below, an accepted, documented gap, not new this
+  session).
+- **UX**: both clients disable every submit button while its mutation is
+  pending (checked all 12 desktop `type="submit"` buttons and mobile's
+  shared `BigButton`) — double-tap/double-submit was already guarded
+  everywhere it mattered. Desktop's `CaseDetailPage` and mobile's visit/
+  case detail screens both have explicit loading, error (with retry), and
+  empty states; a 403 renders as a normal error banner, not a crash.
+- **Security**: `helmet()` defaults, CORS locked to `CLIENT_ORIGIN`, no
+  secret ever appears in a log line (checked every `logger.*` call site
+  touching auth code), refresh tokens stored hashed
+  (`RefreshToken.tokenHash`, never the raw token).
+- **Logging / env config**: structured JSON logger; server refuses to
+  boot on invalid/missing env (Zod-validated in `config/env.ts`), so a
+  misconfigured deployment fails loudly at startup, not with a confusing
+  runtime error later.
+- **TypeScript**: `strict` + `noUncheckedIndexedAccess` +
+  `noImplicitOverride` repo-wide; `pnpm typecheck` clean (see 20.5).
+
+**20.4 Known gaps, reconfirmed, not closed this session** (same
+reasoning as when previous sessions noted them — re-litigated here, not
+newly discovered): Socket.IO connections are still unauthenticated
+(§4.7/§21 item 2 below — payloads stay id-only and every client's actual
+data access is separately authorized via REST, so this is low severity,
+but it should close before this goes beyond internal use); desktop's
+"Ajouter une photo" form still uses the metadata-only endpoint instead of
+a real file picker against the upload endpoint (§21 item 3); no ESLint/
+Prettier anywhere in the repo; no real device has ever run the mobile app
+(web-platform-only verification, §21 item 1). None of these are new —
+carried forward unchanged into the renumbered "Next steps" below.
+
+**20.5 Verification.** Backend test suite: 45/45 passing (39 pre-existing
++ 6 new: the idempotent-re-completion regression, resolved-case
+scheduling rejection, and well-formed-vs-malformed case id handling).
+Full monorepo `pnpm typecheck` clean. No UI changes were made — the audit
+found the existing loading/empty/error-state coverage already adequate,
+so there was nothing to change without adding decorative complexity the
+brief explicitly ruled out.
+
+## 21. Next steps (recommended order for the next session)
 
 1. **Real device pass** — this session's cross-client verification
    (19.4) and session 4's mobile verification were both necessarily
@@ -1392,7 +1534,7 @@ recorded here so a future session doesn't waste time re-diagnosing them:
    `react-native-web` (fine on real native — just not exercisable in a
    browser-based E2E, see 18.9's own scope note).
 
-## 21. Commands reference
+## 22. Commands reference
 
 ```bash
 # Install everything (run from repo root)
@@ -1437,7 +1579,7 @@ service postgresql start
 # worker@msph.local / ChangeMe123! (WORKER)
 ```
 
-## 22. Environment variables
+## 23. Environment variables
 
 See `.env.example` at repo root for the full documented server list —
 copy it to `apps/server/.env` and fill in real values. Never commit
