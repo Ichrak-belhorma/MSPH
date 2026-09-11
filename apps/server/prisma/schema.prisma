@@ -1,0 +1,300 @@
+// MSPH database schema.
+//
+// Enum values here MUST stay in sync with packages/shared/src/enums.ts —
+// application code imports the shared enums (so desktop/mobile don't need
+// a Prisma Client dependency) while Prisma generates its own copy for the
+// server. See CONTEXT.md "Domain decisions" for the reasoning behind the
+// shapes below, especially Case.status.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  ADMIN
+  WORKER
+}
+
+enum CaseStatus {
+  NEW
+  SCHEDULED
+  IN_PROGRESS
+  RESOLVED
+  CANCELLED
+}
+
+enum CasePriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum VisitType {
+  INITIAL_INSPECTION
+  TREATMENT
+  FOLLOW_UP
+  OTHER
+}
+
+enum VisitStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum CaseTreatmentStatus {
+  PLANNED
+  COMPLETED
+  CANCELLED
+}
+
+// ---------------------------------------------------------------------------
+// People & auth
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  firstName    String
+  lastName     String
+  email        String   @unique
+  phone        String?
+  passwordHash String
+  role         UserRole @default(WORKER)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignedVisits          Visit[]         @relation("VisitAssignedWorker")
+  uploadedPhotos          Photo[]         @relation("PhotoUploader")
+  performedCaseTreatments CaseTreatment[] @relation("CaseTreatmentPerformer")
+  refreshTokens           RefreshToken[]
+
+  @@map("users")
+}
+
+/// Hashed refresh tokens for the JWT access/refresh rotation flow.
+/// Storing a hash (not the raw token) means a leaked DB dump can't be used
+/// to mint sessions.
+model RefreshToken {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  firstName String
+  lastName  String
+  phone     String
+  email     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cases Case[]
+
+  @@map("customers")
+}
+
+model Landlord {
+  id        String   @id @default(cuid())
+  firstName String
+  lastName  String
+  phone     String?
+  email     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  properties Property[]
+
+  @@map("landlords")
+}
+
+// ---------------------------------------------------------------------------
+// Property
+// ---------------------------------------------------------------------------
+
+/// A property is owned by a landlord independently of any one customer:
+/// the tenant reporting the problem (Case.customerId) can change over time
+/// (e.g. rental turnover) while the landlord stays the same. See
+/// CONTEXT.md for why Property has no direct customerId.
+model Property {
+  id                            String   @id @default(cuid())
+  address                       String
+  city                          String
+  postalCode                    String
+  additionalAddressInformation  String?
+  landlordId                    String?
+  createdAt                     DateTime @default(now())
+  updatedAt                     DateTime @updatedAt
+
+  landlord Landlord? @relation(fields: [landlordId], references: [id])
+  cases    Case[]
+
+  @@index([landlordId])
+  @@map("properties")
+}
+
+// ---------------------------------------------------------------------------
+// Case / Intervention
+// ---------------------------------------------------------------------------
+
+model Case {
+  id                  String       @id @default(cuid())
+  customerId          String
+  propertyId          String
+  problemDescription  String
+  status              CaseStatus   @default(NEW)
+  priority            CasePriority @default(MEDIUM)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+  resolvedAt          DateTime?
+
+  customer   Customer        @relation(fields: [customerId], references: [id])
+  property   Property        @relation(fields: [propertyId], references: [id])
+  visits     Visit[]
+  photos     Photo[]
+  treatments CaseTreatment[]
+
+  @@index([customerId])
+  @@index([propertyId])
+  @@index([status])
+  @@map("cases")
+}
+
+// ---------------------------------------------------------------------------
+// Visits (consultations / inspections / treatments / follow-ups)
+// ---------------------------------------------------------------------------
+
+model Visit {
+  id                String      @id @default(cuid())
+  caseId            String
+  assignedWorkerId  String?
+  scheduledAt       DateTime
+  startedAt         DateTime?
+  completedAt       DateTime?
+  type              VisitType
+  status            VisitStatus @default(SCHEDULED)
+  notes             String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  case           Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  assignedWorker User?           @relation("VisitAssignedWorker", fields: [assignedWorkerId], references: [id])
+  inspection     Inspection?
+  photos         Photo[]
+  caseTreatments CaseTreatment[]
+
+  @@index([caseId])
+  @@index([assignedWorkerId])
+  @@index([scheduledAt])
+  @@map("visits")
+}
+
+/// The on-site record a worker fills in for a visit (observations, remarks,
+/// property condition). One-to-one with Visit — created when the worker
+/// completes the visit.
+model Inspection {
+  id           String   @id @default(cuid())
+  visitId      String   @unique
+  observations String?
+  remarks      String?
+  condition    String?
+  createdAt    DateTime @default(now())
+
+  visit Visit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+
+  @@map("inspections")
+}
+
+// ---------------------------------------------------------------------------
+// Photos
+// ---------------------------------------------------------------------------
+
+/// Metadata only — binaries live in the storage backend (local disk in dev,
+/// S3-compatible in production). See apps/server/src/storage.
+model Photo {
+  id         String   @id @default(cuid())
+  caseId     String
+  visitId    String?
+  storageKey String
+  url        String?
+  caption    String?
+  uploadedBy String?
+  createdAt  DateTime @default(now())
+
+  case     Case  @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  visit    Visit? @relation(fields: [visitId], references: [id], onDelete: SetNull)
+  uploader User?  @relation("PhotoUploader", fields: [uploadedBy], references: [id])
+
+  @@index([caseId])
+  @@index([visitId])
+  @@map("photos")
+}
+
+// ---------------------------------------------------------------------------
+// Treatments / procedures
+// ---------------------------------------------------------------------------
+
+/// Catalog entry describing a reusable procedure (e.g. "Rodent baiting -
+/// exterior"). CaseTreatment links one of these to a specific case.
+model Treatment {
+  id                String   @id @default(cuid())
+  name              String
+  description       String?
+  instructions      String?
+  durationMinutes   Int?
+  numberOfVisits    Int?
+  safetyInformation String?
+  notes             String?
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  caseTreatments CaseTreatment[]
+
+  @@map("treatments")
+}
+
+/// A treatment applied (or planned) on a case, optionally tied to the visit
+/// it was performed during.
+model CaseTreatment {
+  id          String              @id @default(cuid())
+  caseId      String
+  treatmentId String
+  visitId     String?
+  status      CaseTreatmentStatus @default(PLANNED)
+  notes       String?
+  performedAt DateTime?
+  performedBy String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  case      Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  treatment Treatment @relation(fields: [treatmentId], references: [id])
+  visit     Visit?    @relation(fields: [visitId], references: [id])
+  performer User?     @relation("CaseTreatmentPerformer", fields: [performedBy], references: [id])
+
+  @@index([caseId])
+  @@index([treatmentId])
+  @@map("case_treatments")
+}

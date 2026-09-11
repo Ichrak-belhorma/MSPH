@@ -1,0 +1,35 @@
+{
+  "name": "@msph/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MSPH desktop application (Electron + React) - manager/admin dashboard",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k -n VITE,ELECTRON -c cyan,magenta \"vite\" \"npm:dev:electron\"",
+    "dev:electron": "tsc -p tsconfig.electron.json && wait-on tcp:5173 && cross-env NODE_ENV=development electron . --no-sandbox",
+    "build": "tsc -b && vite build && tsc -p tsconfig.electron.json",
+    "typecheck": "tsc -b --noEmit false --force && tsc -p tsconfig.electron.json --noEmit && echo ok",
+    "preview": "vite preview",
+    "clean": "rm -rf dist dist-electron *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@msph/shared": "workspace:*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.11",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.2",
+    "concurrently": "^9.0.1",
+    "cross-env": "^7.0.3",
+    "electron": "^31.3.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.9",
+    "wait-on": "^8.0.1"
+  }
+}

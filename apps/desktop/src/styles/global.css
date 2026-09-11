@@ -1,0 +1,146 @@
+:root {
+  color-scheme: light;
+  --color-bg: #f4f5f7;
+  --color-surface: #ffffff;
+  --color-border: #e2e4e9;
+  --color-text: #1a1d23;
+  --color-muted: #6b7280;
+  --color-primary: #0f6e5c;
+  --color-primary-contrast: #ffffff;
+  --sidebar-width: 220px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.app-shell {
+  display: flex;
+  height: 100vh;
+}
+
+.sidebar {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  padding: 16px 0;
+  overflow-y: auto;
+}
+
+.sidebar-brand {
+  font-weight: 700;
+  font-size: 1.25rem;
+  padding: 0 20px 16px;
+  color: var(--color-primary);
+}
+
+.sidebar ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sidebar a {
+  display: block;
+  padding: 10px 20px;
+  color: var(--color-text);
+  text-decoration: none;
+  font-size: 0.95rem;
+  border-left: 3px solid transparent;
+}
+
+.sidebar a:hover {
+  background: var(--color-bg);
+}
+
+.sidebar a.active {
+  border-left-color: var(--color-primary);
+  background: var(--color-bg);
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px;
+}
+
+.page h1 {
+  margin: 0 0 4px;
+}
+
+.muted {
+  color: var(--color-muted);
+}
+
+.status-banner {
+  margin: 16px 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+}
+
+.status-banner--connected {
+  border-color: #b7e4d8;
+  background: #eafaf4;
+  color: #0f6e5c;
+}
+
+.status-banner--error {
+  border-color: #f3c2c2;
+  background: #fdecec;
+  color: #b42318;
+}
+
+.bucket-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.bucket-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.bucket-card h2 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.bucket-count {
+  margin-top: 12px;
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
+.placeholder-box {
+  margin-top: 20px;
+  padding: 48px;
+  text-align: center;
+  border: 1px dashed var(--color-border);
+  border-radius: 10px;
+  color: var(--color-muted);
+  background: var(--color-surface);
+}

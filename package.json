@@ -1,0 +1,25 @@
+{
+  "name": "msph",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MSPH - internal field-service management system for disinfection and pest control operations",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {
+    "build": "pnpm -r --filter=./packages/* --filter=./apps/server build",
+    "dev:server": "pnpm --filter @msph/server dev",
+    "dev:desktop": "pnpm --filter @msph/desktop dev",
+    "dev:mobile": "pnpm --filter @msph/mobile start",
+    "dev": "pnpm run \"/^dev:(server|desktop)$/\" --parallel",
+    "typecheck": "pnpm -r typecheck",
+    "prisma:generate": "pnpm --filter @msph/server prisma:generate",
+    "prisma:migrate": "pnpm --filter @msph/server prisma:migrate",
+    "prisma:studio": "pnpm --filter @msph/server prisma:studio"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
