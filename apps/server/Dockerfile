@@ -14,10 +14,21 @@
 # preserving relative paths is what keeps those symlinks valid after
 # `COPY --from=`.
 #
+# Base image is Debian-based (`node:20-bookworm-slim`), NOT Alpine.
+# Prisma's engine binaries are notoriously unreliable on Alpine (musl
+# libc + its OpenSSL packaging) — the exact failure mode is "Prisma
+# failed to detect the libssl/openssl version" followed by the schema
+# engine crashing on startup with a non-JSON error the CLI can't parse.
+# This isn't a version-pinning problem to work around with
+# `binaryTargets`; Prisma's own docs recommend a glibc-based image
+# instead, which is what this does (found by actually deploying this
+# image to Railway and hitting exactly that crash — see CONTEXT.md
+# session 8).
+#
 # See CONTEXT.md "Production deployment" for the full explanation of each
 # stage and how this fits Railway/Render/Fly.io/a plain VPS.
 
-FROM node:20-alpine AS base
+FROM node:20-bookworm-slim AS base
 RUN corepack enable
 WORKDIR /repo
 
@@ -60,9 +71,18 @@ RUN pnpm --filter @msph/server prisma:generate
 # ---------------------------------------------------------------------
 # runtime — the actual production image. Non-root user, only compiled
 # output + production node_modules, no source/tests/dev tooling.
+# `openssl` installed explicitly: some slim Debian variants don't ship
+# it by default, and Prisma's query engine dynamically links against it
+# at runtime (this is the actual library the engine needs present, not
+# just at `prisma generate` time — the earlier crash happened here, in
+# the running container, not during the build).
 # ---------------------------------------------------------------------
-FROM node:20-alpine AS runtime
-RUN corepack enable && addgroup -S msph && adduser -S msph -G msph
+FROM node:20-bookworm-slim AS runtime
+RUN corepack enable \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends openssl \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd -r msph && useradd -r -g msph msph
 WORKDIR /repo
 ENV NODE_ENV=production
 
