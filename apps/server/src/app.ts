@@ -30,16 +30,25 @@ export function createApp(): Express {
     cors({
       // Requests with no Origin header (native mobile fetch, curl,
       // server-to-server) aren't a CORS concern and are always allowed.
-      // A packaged Electron app's renderer, loaded via `win.loadFile()`
-      // (file:// — see apps/desktop/electron/main.cts), sends the literal
-      // string "null" as its Origin per the Fetch spec's handling of
-      // opaque origins — allowed explicitly, not via the CLIENT_ORIGIN
-      // list (a real browser origin should never be able to claim
-      // "null"; a packaged Electron app has no other origin to claim).
+      //
+      // A packaged desktop build's renderer runs at
+      // `http://127.0.0.1:47829` — a loopback-only local HTTP server the
+      // Electron main process starts itself (see apps/desktop/electron/
+      // main.cts's doc comment: an earlier version loaded via `file://`
+      // instead, which turned out to break every `fetch()` call in a real
+      // packaged build — a documented Electron bug, electron/electron
+      // #3922 — found by actually installing and running the Windows
+      // installer, not by inspection; see CONTEXT.md session 8). Allowed
+      // explicitly here, not via CLIENT_ORIGIN: it's the same fixed
+      // origin for every install of this app on every machine, and it's
+      // provably safe to allow unconditionally — loopback-only, so it can
+      // never be reached from outside the user's own machine, and no real
+      // web page can make a browser claim to *be* that origin.
+      //
       // Every other browser-origin request must match one of
       // CLIENT_ORIGIN's comma-separated entries.
       origin(origin, callback) {
-        if (!origin || origin === "null" || clientOrigins.includes(origin)) {
+        if (!origin || origin === "http://127.0.0.1:47829" || clientOrigins.includes(origin)) {
           callback(null, true);
         } else {
           callback(new CorsOriginError(`Origin ${origin} is not allowed by CORS`));
