@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from "electron";
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { registerSecureStorageIpc } from "./secureStorage.cjs";
 
@@ -29,6 +30,49 @@ const isDev = process.env.NODE_ENV === "development";
  * outside this machine or from a real web page).
  */
 const RENDERER_PORT = 47829;
+
+/**
+ * `msph-config.json` — a plain-text, runtime-read config file, checked
+ * on every launch. Read here with a bare `fs.readFileSync` — no Vite, no
+ * `.env` file, no build-time env-var baking, no encoding footguns from a
+ * text editor (all of which turned out to be real, repeated trouble on
+ * one real Windows machine trying to configure `VITE_API_BASE_URL` via
+ * `.env`/`.env.production` — see CONTEXT.md session 8's long debugging
+ * log). This is the SIMPLEST possible mechanism, specifically so it's
+ * trivial to verify by eye: open the file, read the one line in it.
+ *
+ * If present and valid, this takes priority over the Vite-baked
+ * `VITE_API_BASE_URL` (passed to the renderer as a query string param on
+ * the URL it loads, below) — but `VITE_API_BASE_URL` still works exactly
+ * as before if this file doesn't exist; this is an additional, more
+ * foolproof option, not a replacement.
+ *
+ * Location:
+ *   - Packaged build: next to the installed `.exe` — the most
+ *     discoverable possible place ("open the folder you installed MSPH
+ *     into"). Writable without admin rights because this project's NSIS
+ *     config installs per-user (`perMachine: false`).
+ *   - Dev: `apps/desktop/msph-config.json`, next to `package.json`.
+ */
+function loadRuntimeConfig(): { apiBaseUrl?: string; socketUrl?: string } {
+  const configPath = isDev
+    ? path.join(__dirname, "../msph-config.json")
+    : path.join(path.dirname(app.getPath("exe")), "msph-config.json");
+  try {
+    const raw = readFileSync(configPath, "utf-8");
+    const parsed = JSON.parse(raw) as { apiBaseUrl?: unknown; socketUrl?: unknown };
+    const apiBaseUrl = typeof parsed.apiBaseUrl === "string" ? parsed.apiBaseUrl.trim() : undefined;
+    const socketUrl = typeof parsed.socketUrl === "string" ? parsed.socketUrl.trim() : undefined;
+    console.log(`[msph-config] loaded ${configPath}:`, { apiBaseUrl, socketUrl });
+    return { apiBaseUrl: apiBaseUrl || undefined, socketUrl: socketUrl || undefined };
+  } catch (err) {
+    // Optional file — absent or invalid just means "use VITE_API_BASE_URL
+    // instead", not an error. Still logged (not silent) so a launch's own
+    // console output says exactly what happened, for anyone debugging.
+    console.log(`[msph-config] no usable config at ${configPath} (${err instanceof Error ? err.message : String(err)}) — falling back to VITE_API_BASE_URL`);
+    return {};
+  }
+}
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -77,7 +121,21 @@ function startRendererServer(distDir: string): Promise<Server> {
   });
 }
 
-function createMainWindow(): void {
+/** Appends `apiBaseUrl`/`socketUrl` query params when `msph-config.json`
+ * provided them — `src/config.ts` reads these (via
+ * `window.location.search`) before falling back to the Vite-baked
+ * `VITE_API_BASE_URL`. A query param survives regardless of how the page
+ * was loaded (dev server or the local renderer server above) and needs
+ * no preload/contextBridge/IPC plumbing. */
+function withRuntimeConfig(url: string, runtimeConfig: { apiBaseUrl?: string; socketUrl?: string }): string {
+  const params = new URLSearchParams();
+  if (runtimeConfig.apiBaseUrl) params.set("apiBaseUrl", runtimeConfig.apiBaseUrl);
+  if (runtimeConfig.socketUrl) params.set("socketUrl", runtimeConfig.socketUrl);
+  const query = params.toString();
+  return query ? `${url}?${query}` : url;
+}
+
+function createMainWindow(runtimeConfig: { apiBaseUrl?: string; socketUrl?: string }): void {
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -92,23 +150,24 @@ function createMainWindow(): void {
   });
 
   if (isDev) {
-    win.loadURL("http://localhost:5173");
+    win.loadURL(withRuntimeConfig("http://localhost:5173", runtimeConfig));
     win.webContents.openDevTools({ mode: "detach" });
   } else {
-    win.loadURL(`http://127.0.0.1:${RENDERER_PORT}/index.html`);
+    win.loadURL(withRuntimeConfig(`http://127.0.0.1:${RENDERER_PORT}/index.html`, runtimeConfig));
   }
 }
 
 app.whenReady().then(async () => {
   registerSecureStorageIpc();
+  const runtimeConfig = loadRuntimeConfig();
   if (!isDev) {
     await startRendererServer(path.join(__dirname, "../dist"));
   }
-  createMainWindow();
+  createMainWindow(runtimeConfig);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow();
+      createMainWindow(runtimeConfig);
     }
   });
 });

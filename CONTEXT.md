@@ -2006,6 +2006,155 @@ and wasn't verified by execution versus by reading the code — this
 session tried hard not to claim "done" for anything it couldn't actually
 run.
 
+## 22. Real-world deployment debugging (session 8)
+
+The user actually deployed this session — Railway for the backend,
+electron-builder for the Windows desktop installer — and reported real
+errors as they hit them. Four real bugs were found and fixed; two more
+"bugs" turned out to be configuration/environment issues, not code. In
+rough chronological order:
+
+### 22.1 Prisma engine crash on Alpine
+
+Railway deploy log showed the Prisma schema engine crashing on startup
+with a non-JSON error the CLI couldn't parse, preceded by libssl
+warnings. Root cause: `apps/server/Dockerfile` used `node:20-alpine`.
+Prisma's engine binaries are unreliable on Alpine (musl libc + its
+OpenSSL packaging) — not a version-pinning problem, Prisma's own docs
+recommend a glibc-based image instead. Fixed by switching both the
+`base` and `runtime` stages to `node:20-bookworm-slim`, and updating the
+Alpine-specific `addgroup`/`adduser` syntax to Debian's
+`groupadd`/`useradd`. Verified: local typecheck + 45/45 tests (this
+doesn't exercise Docker directly — no Docker daemon in this sandbox —
+but confirmed via the user's next Railway deploy). Commit `cb5caad`.
+
+### 22.2 Prisma OpenSSL version mismatch (debian-openssl-1.1.x vs 3.0.x)
+
+Next Railway deploy got past the Alpine crash but failed with "engine
+generated for debian-openssl-1.1.x, but deployment required 3.0.x".
+Root cause: `prisma generate` auto-detects which OpenSSL version to
+target by checking what's installed in the stage that runs it — the
+Dockerfile's `runtime` stage installed `openssl`, but `deps`/`build` and
+`prod-deps` (the stages that actually run `prisma generate`) didn't, so
+detection silently guessed wrong. Fixed two ways, deliberately
+redundant: (1) moved `apt-get install openssl` into the shared `base`
+stage, inherited by every stage that generates a client; (2) added
+explicit `binaryTargets = ["native", "debian-openssl-3.0.x"]` to
+`schema.prisma`'s generator block, so the right engine ships regardless
+of what auto-detection guesses. Verified locally: confirmed
+`libquery_engine-debian-openssl-3.0.x.so.node` actually present on disk
+after `prisma generate`, 45/45 tests. Commit `188e81b`.
+
+### 22.3 Electron `fetch()` + `file://` incompatibility (electron/electron#3922)
+
+Packaged Windows installer showed "Impossible de contacter le serveur"
+on every login attempt. DevTools console (screenshot from the user)
+showed `net::ERR_FILE_NOT_FOUND` on the login request — not a network
+error, a resource-loading error, despite the request being a `fetch()`
+POST to a real HTTPS URL. Researched via WebSearch: this is a long-
+documented Electron bug — a renderer loaded via `win.loadFile()` (a
+`file://` origin) breaks `fetch()` for cross-origin requests, which is
+exactly what every API call in this app's `apiClient.ts` is. Fixed by
+rewriting `apps/desktop/electron/main.cts` to serve the renderer over
+plain loopback HTTP instead of `file://`: a tiny `node:http` static file
+server bound to `127.0.0.1:47829` (fixed port, not ephemeral — see its
+own doc comment for why), serving `dist/` transparently through the
+asar archive, with SPA-style fallback to `index.html` for extensionless
+paths. Production `BrowserWindow` now does
+`win.loadURL("http://127.0.0.1:47829/index.html")` instead of
+`win.loadFile()`. Backend CORS (`apps/server/src/app.ts`) updated to
+allow this exact origin unconditionally — safe because it's
+loopback-only, never reachable from outside the user's own machine, and
+no real web page can make a browser claim to *be* that origin.
+Verified: a real `electron-builder` package, launched headless under
+Xvfb with `--remote-debugging-port`, inspected via raw CDP
+(`Runtime.evaluate` over the debugger WebSocket) — confirmed the
+renderer actually loads from the new origin. Could **not** verify the
+live network round-trip end-to-end in this sandbox: even a plain GET
+from inside Electron to an external host fails here (confirmed via a
+control test), because this sandbox's own outbound proxy is invisible
+to Electron's network stack specifically — a sandbox limitation, not a
+statement about whether the fix works on a real machine. Commit
+`8986fe7`.
+
+### 22.4 Desktop dev mode wouldn't pick up `VITE_API_BASE_URL` from `.env`
+
+After the fixes above, the user tried pointing local dev mode
+(`pnpm dev`) at the Railway backend instead of running a local server —
+`apps/desktop/.env` with `VITE_API_BASE_URL=https://msph-production.up.railway.app/api`.
+The app kept falling back to `http://localhost:4000/api` regardless.
+Four rounds of remote diagnosis on the user's Windows machine (full
+`pnpm dev` restart, recreating `.env` via Notepad instead of PowerShell
+`echo` to rule out UTF-16 encoding, a full fresh `git clone` +
+`pnpm install`) all produced the same result. Re-reading
+`vite.config.ts`, `src/config.ts`, `src/vite-env.d.ts` and grepping for
+stray `localhost`/`4000` references found no bug in the code — the
+mechanism is structurally correct. Root cause was never conclusively
+identified (most likely something specific to that machine's Vite/Node
+setup, never confirmed).
+
+**Fix — a second, independent config path that bypasses Vite's `.env`
+loading entirely**: `main.cts` now optionally reads a plain
+`msph-config.json` file with a bare `fs.readFileSync` (dev:
+`apps/desktop/msph-config.json`, next to `package.json`; packaged:
+next to the installed `.exe` — writable without admin rights since NSIS
+installs per-user) and, if present, appends `apiBaseUrl`/`socketUrl` as
+query-string params on whatever URL it loads
+(`withRuntimeConfig()`). `src/config.ts` now reads
+`new URLSearchParams(window.location.search)` for those params *before*
+falling back to `import.meta.env.VITE_API_BASE_URL` — see
+`readRuntimeConfigParam()`. This is deliberately the simplest possible
+mechanism (no bundler, no build step, no encoding footguns from a text
+editor) specifically so it's trivial to verify by eye and matches
+exactly what a real user would want: "open the folder you installed
+MSPH into, drop in one small JSON file." `.gitignore` updated so a real
+`msph-config.json` (machine-specific, holds a live URL) is never
+committed, mirroring the existing `.env`/`.env.example` pattern; a
+`msph-config.example.json` documents its shape. The Vite `.env`
+mechanism still works exactly as before — this is an additional
+fallback, not a replacement, so nothing about session 7's env-config
+system changed.
+
+Verified end-to-end in this sandbox (dev-mode code path, the one the
+user was actually blocked on): launched Vite + Electron headless under
+Xvfb, with a real `msph-config.json` present; confirmed via the main
+process's own log line that it read and parsed the file; confirmed via
+CDP `Runtime.evaluate` that `window.location.search` carried the
+expected query string in the renderer; then actually filled in and
+submitted the login form via a synthetic DOM event and watched
+`Network.requestWillBeSent` over CDP — the request went to
+`https://msph-production.up.railway.app/api/auth/login`, not
+`localhost:4000`. Full typecheck (all 4 packages) and
+`pnpm --filter @msph/desktop build` also clean; server test suite
+re-run 45/45 (local Postgres started in this sandbox specifically to
+run it). The packaged-build code path (`app.getPath("exe")`-relative
+lookup) was written the same way as the already-verified dev path but
+not re-verified by execution this session (no Windows/no real installer
+run here).
+
+### 22.5 Two configuration issues that were never code bugs
+
+- **`desktop-v0.1.1` git tag pointed at a commit that predated the real
+  fix.** `git fetch origin --tags` + `git merge-base --is-ancestor`
+  showed the tag's commit wasn't an ancestor of this fix branch, so the
+  CI-built `.exe` from that tag could never have contained the fetch()
+  fix. User was told to delete and recreate the tag against the current
+  branch head.
+- **Markdown link syntax pasted into a config value.** A DevTools
+  warning showed `VITE_API_BASE_URL="[https://...](https://...)"` — the
+  literal rendered-chat-link brackets, not a real URL — in both the
+  local `.env.production` (user fixed it) and, separately, the GitHub
+  Actions repository Variable of the same name (which is what a fresh
+  CI checkout actually uses, since `.env.production` is gitignored and
+  never present in CI). A reminder for future sessions: when telling a
+  user to paste a URL into a config file or CI variable, say explicitly
+  "paste the plain URL, not a markdown link" — this has now bitten twice
+  in different projects.
+
+Not yet confirmed by the user as resolved: whether the GitHub Actions
+variable was fixed, whether the tag was recreated, and whether they're
+working from a `main` branch that has diverged from this one.
+
 ## 23. Next steps (recommended order for the next session)
 
 Reordered this session — deployment execution now leads, since §21.10

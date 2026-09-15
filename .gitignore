@@ -47,6 +47,12 @@ apps/server/prisma/dev.db*
 !.env.example
 !.env.*.example
 
+# apps/desktop's runtime config file (see electron/main.cts) — a real one
+# holds a live server URL, machine-specific; only the committed
+# .example.json documents its shape.
+apps/desktop/msph-config.json
+!apps/desktop/msph-config.example.json
+
 # Logs
 *.log
 npm-debug.log*

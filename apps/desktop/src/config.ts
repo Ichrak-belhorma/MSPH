@@ -21,11 +21,26 @@ import { resolveApiConfig, looksInsecureForProduction, MissingApiUrlError, type 
  * would just look like "the app is broken", with no clue why — see
  * CONTEXT.md session 7.
  */
+/**
+ * `main.cts` optionally reads `msph-config.json` (a plain runtime file next
+ * to `package.json` in dev, next to the installed `.exe` in production —
+ * see its own doc comment) and appends `apiBaseUrl`/`socketUrl` as query
+ * params on whatever URL it loads. Checked here, ahead of the Vite-baked
+ * `VITE_API_BASE_URL`, so that file — when present — always wins: it's a
+ * plain-text file read with bare `fs.readFileSync`, no bundler involved,
+ * meant as a foolproof fallback for when `.env`/`.env.production` loading
+ * doesn't behave as expected (see CONTEXT.md session 8).
+ */
+function readRuntimeConfigParam(name: "apiBaseUrl" | "socketUrl"): string | undefined {
+  const value = new URLSearchParams(window.location.search).get(name);
+  return value && value.trim() !== "" ? value : undefined;
+}
+
 function loadConfig(): ApiConfig {
   const config = resolveApiConfig(
     {
-      rawApiUrl: import.meta.env.VITE_API_BASE_URL,
-      rawSocketUrl: import.meta.env.VITE_SOCKET_URL,
+      rawApiUrl: readRuntimeConfigParam("apiBaseUrl") ?? import.meta.env.VITE_API_BASE_URL,
+      rawSocketUrl: readRuntimeConfigParam("socketUrl") ?? import.meta.env.VITE_SOCKET_URL,
       isDev: import.meta.env.DEV,
     },
     "VITE_API_BASE_URL",
