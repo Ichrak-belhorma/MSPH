@@ -45,10 +45,24 @@ export function createApp(): Express {
       // never be reached from outside the user's own machine, and no real
       // web page can make a browser claim to *be* that origin.
       //
+      // `http://localhost:5173` — Vite's default dev-server port — gets
+      // the exact same unconditional treatment, for the same reasons: a
+      // remote attacker cannot forge a browser's Origin header, so the
+      // only way a request can genuinely carry this origin is a page
+      // actually served from the requester's own machine on that port;
+      // and auth here is a Bearer token (see apiClient.ts), never a
+      // cookie, so there's no credentialed-cookie CSRF angle either way.
+      // Allowed unconditionally (not only via CLIENT_ORIGIN) so pointing
+      // a local `pnpm dev` at this deployed API — desktop's own
+      // "point dev mode at Railway instead of running a local backend"
+      // workflow — never depends on this deployment's CLIENT_ORIGIN
+      // variable happening to include it (found failing exactly this way
+      // — see CONTEXT.md session 8).
+      //
       // Every other browser-origin request must match one of
       // CLIENT_ORIGIN's comma-separated entries.
       origin(origin, callback) {
-        if (!origin || origin === "http://127.0.0.1:47829" || clientOrigins.includes(origin)) {
+        if (!origin || origin === "http://127.0.0.1:47829" || origin === "http://localhost:5173" || clientOrigins.includes(origin)) {
           callback(null, true);
         } else {
           callback(new CorsOriginError(`Origin ${origin} is not allowed by CORS`));

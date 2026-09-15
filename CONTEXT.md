@@ -2155,6 +2155,40 @@ Not yet confirmed by the user as resolved: whether the GitHub Actions
 variable was fixed, whether the tag was recreated, and whether they're
 working from a `main` branch that has diverged from this one.
 
+### 22.6 CORS rejected `pnpm dev` pointed at the Railway API
+
+With `msph-config.json` in place (§22.4) and working — confirmed by the
+Railway URL showing up correctly in the window's query string — the
+next real error was a browser-console CORS rejection: "No
+'Access-Control-Allow-Origin' header is present", origin
+`http://localhost:5173` (Vite's dev server), talking to
+`https://msph-production.up.railway.app/api/auth/login`. Not a server
+crash — the request never reached the route handler; `cors()`'s
+`origin()` callback rejected it because `http://localhost:5173` wasn't
+in Railway's `CLIENT_ORIGIN` variable. This is exactly the "point
+`pnpm dev` at a deployed API instead of running a local backend"
+workflow chosen back in §22 (the "Option A" the user picked to avoid
+setting up local Postgres) — and it depended on that deployment's
+`CLIENT_ORIGIN` env var happening to include the dev origin, which it
+didn't.
+
+Fixed the same way `http://127.0.0.1:47829` (the packaged desktop's
+loopback renderer origin) was already handled: added
+`http://localhost:5173` as a second unconditionally-allowed origin in
+`app.ts`'s CORS `origin()` callback, independent of `CLIENT_ORIGIN`.
+Same safety reasoning applies — a remote page can't forge a browser's
+`Origin` header, so genuinely receiving this origin means the request
+came from something actually running on the requester's own machine on
+that port; and this app authenticates with a Bearer token
+(`apiClient.ts`), never a cookie, so there's no credentialed-cookie CSRF
+angle to worry about either way. This means `pnpm dev` against any
+deployment of this backend now works out of the box, with no
+`CLIENT_ORIGIN` configuration required on the server side for local
+development specifically. Added `tests/cors.test.ts` (3 tests) to lock
+both fixed-origin exceptions in and confirm an arbitrary origin still
+gets rejected — full suite re-verified at 48/48 (45 + these 3). Commit
+follows this session's msph-config.json fix.
+
 ## 23. Next steps (recommended order for the next session)
 
 Reordered this session — deployment execution now leads, since §21.10
